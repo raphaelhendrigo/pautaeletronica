@@ -1,0 +1,24 @@
+*** Begin Patch
+*** Update File: docx_maker.py
+@@
+-def _add_intro_from_meta(doc: Document, meta: SessionMeta) -> None:
+-    p = doc.add_paragraph()
+-    _para_fmt(p, align=WD_ALIGN_PARAGRAPH.JUSTIFY, before=0, after=10, line=1.15)
+-    run = p.add_run(_montar_intro(meta))
+-    _fontify(run, size=12)
++def _add_intro_from_meta(doc: Document, meta: SessionMeta) -> None:
++    # Centraliza "PAUTA" na primeira linha (em negrito),
++    # e coloca o restante do texto introdutório no parágrafo seguinte.
++    intro = _montar_intro(meta)
++    head = "PAUTA"
++    rest = intro
++    if intro.upper().startswith("PAUTA "):
++        rest = intro[len("PAUTA "):].lstrip()
++
++    _add_centered(doc, head, bold=True, size=14)
++
++    p = doc.add_paragraph()
++    _para_fmt(p, align=WD_ALIGN_PARAGRAPH.JUSTIFY, before=0, after=10, line=1.15)
++    run = p.add_run(rest)
++    _fontify(run, size=12)
+*** End Patch

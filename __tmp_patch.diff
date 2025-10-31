@@ -1,0 +1,33 @@
+*** Begin Patch
+*** Update File: docx_maker.py
+@@
+ def gerar_docx_unificado(
+@@
+     doc.save(str(out_path))
+     return str(out_path)
++
++
++def gerar_docx_vazio(
++    *,
++    saida_docx: str | Path,
++    titulo: str | None = None,
++    header_template: str | Path | None = None,
++    meta_sessao: SessionMeta | None = None,
++) -> str:
++    """Gera um DOCX apenas com cabeçalho (meta ou padrão), sem itens."""
++    doc = _open_document_from_template(header_template)
++    if meta_sessao is None:
++        env_meta = _meta_from_env()
++        meta_sessao = env_meta
++    if meta_sessao:
++        meta_sessao.normalizar()
++        _add_intro_from_meta(doc, meta_sessao)
++    else:
++        _add_intro_padrao(doc, titulo)
++    # Indicação opcional de ausência de itens
++    _add_centered(doc, "(Sem itens)", bold=False, size=11)
++    out_path = Path(saida_docx)
++    out_path.parent.mkdir(parents=True, exist_ok=True)
++    doc.save(str(out_path))
++    return str(out_path)
+*** End Patch

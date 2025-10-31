@@ -1,0 +1,51 @@
+*** Begin Patch
+*** Update File: docx_maker.py
+@@
+-    # Prioridade fixa de revisores dentro de cada relator
+-    rev_order = {
+-        "ricardo torres": 1,
+-        "roberto braguim": 2,
+-        "joao antonio": 3,
+-        "eduardo tuma": 4,
+-    }
+-    df["__RevisorOrder"] = df["Revisor"].map(lambda n: rev_order.get(_strip_accents_lower(_ws(n)), 999))
++    # Prioridade fixa de revisores dentro de cada relator
++    # Ordem solicitada: 1) Vice-Presidente Ricardo Torres; 2) Corregedor Roberto Braguim;
++    # 3) (demais) – mantemos Joao Antonio; 4) Conselheiro Eduardo Tuma; demais depois.
++    rev_order = {
++        "ricardo torres": 1,
++        "roberto braguim": 2,
++        "joao antonio": 3,
++        "eduardo tuma": 4,
++    }
++    df["__RevisorOrder"] = df["Revisor"].map(lambda n: rev_order.get(_strip_accents_lower(_ws(n)), 999))
+@@
+-        for idx, (revisor, bloco_revisor) in enumerate(groups, start=1):
++        # Função para rotular o cargo do revisor no título
++        def _cargo_revisor(nome: str) -> str:
++            k = _strip_accents_lower(_ws(nome))
++            if k == "ricardo torres":
++                return "VICE-PRESIDENTE"
++            if k == "roberto braguim":
++                return "CORREGEDOR"
++            return "CONSELHEIRO"
++
++        for idx, (revisor, bloco_revisor) in enumerate(groups, start=1):
+             prefix = f"{_alpha(idx)} - " if multi else ""
+             subt = doc.add_paragraph()
+             _para_fmt(subt, align=WD_ALIGN_PARAGRAPH.LEFT, before=4, after=2, line=1.0)
+-            run_sub = subt.add_run(f"{prefix}REVISOR CONSELHEIRO {revisor}")
++            cargo = _cargo_revisor(revisor)
++            run_sub = subt.add_run(f"{prefix}REVISOR {cargo} {revisor}")
+             _fontify(run_sub, size=12, bold=True)
+@@
+-            for idx, (revisor, bloco_revisor) in enumerate(groups, start=1):
++            for idx, (revisor, bloco_revisor) in enumerate(groups, start=1):
+                 prefix = f"{_alpha(idx)} - " if multi else ""
+                 subt = doc.add_paragraph()
+                 _para_fmt(subt, align=WD_ALIGN_PARAGRAPH.LEFT, before=4, after=2, line=1.0)
+-                run_sub = subt.add_run(f"{prefix}REVISOR CONSELHEIRO {revisor}")
++                cargo = _cargo_revisor(revisor)
++                run_sub = subt.add_run(f"{prefix}REVISOR {cargo} {revisor}")
+                 _fontify(run_sub, size=12, bold=True)
+*** End Patch

@@ -1,0 +1,1527 @@
+0001: # docx_maker.py
+0002: 
+0003: from __future__ import annotations
+0004: 
+0005: 
+0006: 
+0007: import re
+0008: 
+0009: import unicodedata
+0010: 
+0011: from dataclasses import dataclass
+0012: 
+0013: from datetime import datetime, timedelta
+0014: 
+0015: from pathlib import Path
+0016: 
+0017: from typing import List, Optional, Tuple
+0018: 
+0019: 
+0020: 
+0021: import pandas as pd
+0022: 
+0023: from docx import Document
+0024: 
+0025: from docx.enum.text import WD_ALIGN_PARAGRAPH
+0026: 
+0027: from docx.shared import Pt
+0028: 
+0029: from docx.opc.exceptions import PackageNotFoundError
+0030: 
+0031: 
+0032: 
+0033: 
+0034: 
+0035: # =========================
+0036: 
+0037: # Utilidades básicas
+0038: 
+0039: # =========================
+0040: 
+0041: 
+0042: 
+0043:     # Função para rotular o cargo do relator/conselheiro no título do bloco
+0044: 
+0045:     def _cargo_conselheiro(nome: str) -> str:
+0046: 
+0047:         k = _strip_accents_lower(_ws(nome))
+0048: 
+0049:         if k == "roberto braguim":
+0050: 
+0051:             return "CONSELHEIRO CORREGEDOR"
+0052: 
+0053:         return "CONSELHEIRO"
+0054: 
+0055: 
+0056: 
+0057: def _ws(s) -> str:
+0058: 
+0059:     if s is None or (isinstance(s, float) and pd.isna(s)):
+0060: 
+0061:         return ""
+0062: 
+0063:     return re.sub(r"\s+", " ", str(s)).strip()
+0064: 
+0065: 
+0066: 
+0067: 
+0068: 
+0069: def _strip_accents_lower(s: str) -> str:
+0070: 
+0071:     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+0072: 
+0073:     return s.lower()
+0074: 
+0075: 
+0076: 
+0077: 
+0078: 
+0079: def _detect_cols_basic(cols: List[str]) -> Tuple[int, int, Optional[int], Optional[int], Optional[int]]:
+0080: 
+0081:     """
+0082: 
+0083:     Retorna índices (0-based): (proc_idx, obj_idx, relator_idx, revisor_idx, motivo_idx)
+0084: 
+0085:     - Heurística por nome de coluna (processo/objeto/relator/revisor/motivo).
+0086: 
+0087:     - Fallbacks:
+0088: 
+0089:         * Relator  -> coluna 7 (index 6), se existir
+0090: 
+0091:         * Revisor  -> coluna 8 (index 7), se existir
+0092: 
+0093:         * Motivo   -> coluna 10 (index 9), se existir
+0094: 
+0095:     """
+0096: 
+0097:     proc_idx, obj_idx = 1, 3
+0098: 
+0099:     relator_idx, revisor_idx, motivo_idx = None, None, None
+0100: 
+0101: 
+0102: 
+0103:     for i, c in enumerate(cols):
+0104: 
+0105:         cl = c.lower()
+0106: 
+0107:         if any(k in cl for k in ["processo", "nº do processo", "numero do processo"]):
+0108: 
+0109:             proc_idx = i
+0110: 
+0111:         elif any(k in cl for k in ["objeto", "objeto de julgamento"]):
+0112: 
+0113:             obj_idx = i
+0114: 
+0115:         elif any(k in cl for k in ["relator", "conselheiro", "relator(a)"]):
+0116: 
+0117:             relator_idx = i
+0118: 
+0119:         elif "revisor" in cl or "revisor(a)" in cl:
+0120: 
+0121:             revisor_idx = i
+0122: 
+0123:         elif "motivo" in cl:
+0124: 
+0125:             motivo_idx = i
+0126: 
+0127: 
+0128: 
+0129:     n = len(cols)
+0130: 
+0131:     proc_idx = proc_idx if proc_idx < n else min(1, n - 1)
+0132: 
+0133:     obj_idx = obj_idx if obj_idx < n else min(3, n - 1)
+0134: 
+0135: 
+0136: 
+0137:     if relator_idx is None and n >= 7:
+0138: 
+0139:         relator_idx = 6
+0140: 
+0141:     if revisor_idx is None and n >= 8:
+0142: 
+0143:         revisor_idx = 7
+0144: 
+0145:     if motivo_idx is None and n >= 10:
+0146: 
+0147:         motivo_idx = 9
+0148: 
+0149: 
+0150: 
+0151:     return proc_idx, obj_idx, relator_idx, revisor_idx, motivo_idx
+0152: 
+0153: 
+0154: 
+0155: 
+0156: 
+0157: # --------- Mapeamento (iniciais → nome por extenso) ---------
+0158: 
+0159: _NAME_MAP = {
+0160: 
+0161:     "ET": "EDUARDO TUMA",
+0162: 
+0163:     "DD": "DOMINGOS DISSEI",
+0164: 
+0165:     "JA": "JOÃO ANTÔNIO",
+0166: 
+0167:     "RT": "RICARDO TORRES",
+0168: 
+0169:     "RB": "ROBERTO BRAGUIM",
+0170: 
+0171: }
+0172: 
+0173: 
+0174: 
+0175: # Duplas padrão Relator → Revisor
+0176: 
+0177: _DUO_RELATOR_REVISOR = {
+0178: 
+0179:     "ricardo torres": "ROBERTO BRAGUIM",
+0180: 
+0181:     "roberto braguim": "JOÃO ANTÔNIO",
+0182: 
+0183:     "joao antonio": "EDUARDO TUMA",
+0184: 
+0185:     "eduardo tuma": "RICARDO TORRES",
+0186: 
+0187:     "domingos dissei": "ROBERTO BRAGUIM",
+0188: 
+0189: }
+0190: 
+0191: 
+0192: 
+0193: # Palavras/expressões-chave a destacar (em negrito) no campo "Objeto".
+0194: 
+0195: # Mantém a ordem sem impactar a renderização, usada apenas como prioridade de busca.
+0196: 
+0197: _OBJ_HL_TERMS: list[str] = [
+0198: 
+0199:     # A) Recurso; B) Diversos; C) Contratos
+0200: 
+0201:     "Recurso",
+0202: 
+0203:     "Diversos",
+0204: 
+0205:     # Contratos – subtipos
+0206: 
+0207:     "Nota de Empenho com Termo Aditivo",
+0208: 
+0209:     "Nota de Empenho",
+0210: 
+0211:     "Análise de Licitação",
+0212: 
+0213:     "Lei 8.666",
+0214: 
+0215:     "Lei 14.133",
+0216: 
+0217:     "Ordem de Execução de Serviço",
+0218: 
+0219:     "Execução Contratual",
+0220: 
+0221:     "Carta-Contrato",
+0222: 
+0223:     "Contrato com Termo Aditivo",
+0224: 
+0225:     "Carta-Contrato com Termo Aditivo",
+0226: 
+0227:     "Consórcio",
+0228: 
+0229:     "Termo de Copatrocínio",
+0230: 
+0231:     "Convênio com Termo Aditivo",
+0232: 
+0233:     "Convênio com Termo de Rescisão",
+0234: 
+0235:     "Convênio",
+0236: 
+0237:     "Termo de Quitação",
+0238: 
+0239:     "Termo de Recebimento Definitivo",
+0240: 
+0241:     "Carta Aditiva",
+0242: 
+0243:     "Termo Aditivo com Nota de Empenho",
+0244: 
+0245:     "Termo Aditivo",
+0246: 
+0247:     "Termo de Prorrogação",
+0248: 
+0249:     "Termo de Recebimento Provisório",
+0250: 
+0251:     "Termo de Retirratificação com valor",
+0252: 
+0253:     "Termo de Retirratificação sem valor",
+0254: 
+0255:     "Termo de Compromisso e Autorização de Fornecimento",
+0256: 
+0257:     "Termo de Quitação de Obrigações",
+0258: 
+0259:     "Termo de Rescisão",
+0260: 
+0261:     "Termo Aditivo com Execução Contratual",
+0262: 
+0263:     "Autorização de Fornecimento",
+0264: 
+0265:     "Pedido de Compra",
+0266: 
+0267:     "Acompanhamentos",
+0268: 
+0269:     "Acompanhamento de edital",
+0270: 
+0271:     "Acompanhamento de procedimento licitatório",
+0272: 
+0273:     "Acompanhamento - Execução Contratual",
+0274: 
+0275:     "Acompanhamento – Execução Contábil e Financeira",
+0276: 
+0277:     "Acompanhamento - Execução Contábil e Financeira",
+0278: 
+0279:     "- Acompanhamento - Execução Contábil e Financeira",
+0280: 
+0281:     # D) E) F)
+0282: 
+0283:     "Contratos de Emergência",
+0284: 
+0285:     "Lei Municipal 11.100/91",
+0286: 
+0287:     "Subvenções",
+0288: 
+0289:     "Auxílios",
+0290: 
+0291:     "Reinclusões",
+0292: 
+0293: ]
+0294: 
+0295: 
+0296: 
+0297: def _norm_term_label(term: str) -> str:
+0298: 
+0299:     t = _strip_accents_lower(_ws(term))
+0300: 
+0301:     t = t.replace("–", "-").replace("—", "-")
+0302: 
+0303:     t = re.sub(r"^[\s\-]+", "", t)
+0304: 
+0305:     t = re.sub(r"\s+", " ", t)
+0306: 
+0307:     return t
+0308: 
+0309: 
+0310: 
+0311: def _compile_keyword_patterns() -> list[tuple[str, re.Pattern]]:
+0312: 
+0313:     patterns: list[tuple[str, re.Pattern]] = []
+0314: 
+0315:     # Classe de hífens/traços Unicode comum: ASCII '-' e U+2010..U+2015
+0316: 
+0317:     hy = r"[-\u2010-\u2015]"
+0318: 
+0319:     for term in sorted(_OBJ_HL_TERMS, key=len, reverse=True):  # prioriza termos mais longos
+0320: 
+0321:         # Constrói regex tolerante a espaços múltiplos e variação de hífens
+0322: 
+0323:         esc = re.escape(term)
+0324: 
+0325:         esc = esc.replace(r"\ ", r"\s+")
+0326: 
+0327:         # Normaliza hífens/traços para classe comum
+0328: 
+0329:         esc = esc.replace(r"\-", hy)           # hífen ASCII escapado
+0330: 
+0331:         esc = esc.replace("\u2010", hy)         # HYPHEN (se escapar como literal)
+0332: 
+0333:         esc = esc.replace("\u2011", hy)         # NON-BREAKING HYPHEN
+0334: 
+0335:         esc = esc.replace("\u2012", hy)         # FIGURE DASH
+0336: 
+0337:         esc = esc.replace("\u2013", hy)         # EN DASH
+0338: 
+0339:         esc = esc.replace("\u2014", hy)         # EM DASH
+0340: 
+0341:         esc = esc.replace("\u2015", hy)         # HORIZONTAL BAR
+0342: 
+0343:         # aceita variações de ' - ' como ' - ' ou ' – '
+0344: 
+0345:         esc = esc.replace(r"\:\ ", r":?\s*")
+0346: 
+0347:         try:
+0348: 
+0349:             pat = re.compile(esc, flags=re.IGNORECASE)
+0350: 
+0351:             patterns.append((_norm_term_label(term), pat))
+0352: 
+0353:         except re.error:
+0354: 
+0355:             # fallback simples se algo der errado
+0356: 
+0357:             patterns.append((_norm_term_label(term), re.compile(re.escape(term), flags=re.IGNORECASE)))
+0358: 
+0359:     return patterns
+0360: 
+0361: 
+0362: 
+0363: _OBJ_HL_PATTERNS = _compile_keyword_patterns()
+0364: 
+0365: 
+0366: 
+0367: def _expand_initials(value: str) -> str:
+0368: 
+0369:     """
+0370: 
+0371:     Converte iniciais para nome por extenso:
+0372: 
+0373:     - 'ET', 'E.T.', ' et ' → 'EDUARDO TUMA'
+0374: 
+0375:     - Se já vier por extenso, normaliza (UPPER, trim).
+0376: 
+0377:     """
+0378: 
+0379:     s = _ws(value)
+0380: 
+0381:     if not s:
+0382: 
+0383:         return ""
+0384: 
+0385:     code = re.sub(r"[^A-Za-z]", "", s).upper()
+0386: 
+0387:     if 1 <= len(code) <= 3 and code in _NAME_MAP:
+0388: 
+0389:         return _NAME_MAP[code]
+0390: 
+0391:     return s.upper()
+0392: 
+0393: 
+0394: 
+0395: 
+0396: 
+0397: def _relator_from_filename(path: Path) -> str:
+0398: 
+0399:     """
+0400: 
+0401:     Extrai o relator do nome do arquivo exportado pelo e-TCM.
+0402: 
+0403:     Ex.: PLENARIO_DOMINGOS_DISSEI.xlsx -> DOMINGOS DISSEI
+0404: 
+0405:     """
+0406: 
+0407:     stem = path.stem  # ex.: PLENARIO_DOMINGOS_DISSEI
+0408: 
+0409:     stem = re.sub(r"(?i)^PLENARIO_", "", stem)
+0410: 
+0411:     stem = re.sub(r"[_\s]+", " ", stem).strip()
+0412: 
+0413:     return _expand_initials(stem)
+0414: 
+0415: 
+0416: 
+0417: 
+0418: 
+0419: def _is_reinclusao_text(motivo: str) -> bool:
+0420: 
+0421:     """
+0422: 
+0423:     Detecta 'reinclusão' de forma robusta (ignora acento, hífen, caixa).
+0424: 
+0425:     Marca True se contiver 'reinclus' ou 'reinc' no texto.
+0426: 
+0427:     """
+0428: 
+0429:     if not motivo:
+0430: 
+0431:         return False
+0432: 
+0433:     t = _strip_accents_lower(motivo)
+0434: 
+0435:     t = t.replace("-", "").replace(" ", "")
+0436: 
+0437:     return ("reinclus" in t) or ("reinc" in t)
+0438: 
+0439: 
+0440: 
+0441: 
+0442: 
+0443: def _alpha(n: int) -> str:
+0444: 
+0445:     """
+0446: 
+0447:     1->A, 2->B, ..., 26->Z, 27->AA ...
+0448: 
+0449:     """
+0450: 
+0451:     s = ""
+0452: 
+0453:     while n > 0:
+0454: 
+0455:         n -= 1
+0456: 
+0457:         s = chr(65 + (n % 26)) + s
+0458: 
+0459:         n //= 26
+0460: 
+0461:     return s or "A"
+0462: 
+0463: 
+0464: 
+0465: 
+0466: 
+0467: def _ler_planilha(path: Path) -> pd.DataFrame:
+0468: 
+0469:     df = pd.read_excel(path, dtype=str)
+0470: 
+0471:     df.columns = [str(c) for c in df.columns]
+0472: 
+0473:     # Garante no mínimo 10 colunas para atender aos fallbacks (inclui Motivo)
+0474: 
+0475:     if len(df.columns) < 10:
+0476: 
+0477:         for k in range(len(df.columns), 10):
+0478: 
+0479:             df[f"_X{k+1}"] = ""
+0480: 
+0481:         df = df[[*df.columns]]
+0482: 
+0483: 
+0484: 
+0485:     proc_idx, obj_idx, relator_idx, revisor_idx, motivo_idx = _detect_cols_basic(df.columns.tolist())
+0486: 
+0487: 
+0488: 
+0489:     processos = df.iloc[:, proc_idx].apply(_ws)
+0490: 
+0491:     objetos   = df.iloc[:, obj_idx].apply(_ws)
+0492: 
+0493: 
+0494: 
+0495:     # RELATOR (coluna 7; se vazio, extrai do nome do arquivo)
+0496: 
+0497:     if relator_idx is not None and relator_idx < len(df.columns):
+0498: 
+0499:         relatores = df.iloc[:, relator_idx].apply(_expand_initials)
+0500: 
+0501:         if relatores.fillna("").eq("").all():
+0502: 
+0503:             relator_nome_arquivo = _relator_from_filename(path)
+0504: 
+0505:             relatores = pd.Series([relator_nome_arquivo] * len(df))
+0506: 
+0507:     else:
+0508: 
+0509:         relator_nome_arquivo = _relator_from_filename(path)
+0510: 
+0511:         relatores = pd.Series([relator_nome_arquivo] * len(df))
+0512: 
+0513: 
+0514: 
+0515:     # REVISOR (coluna 8; se ausente, deixa '-')
+0516: 
+0517:     if revisor_idx is not None and revisor_idx < len(df.columns):
+0518: 
+0519:         revisores = df.iloc[:, revisor_idx].apply(_expand_initials)
+0520: 
+0521:     else:
+0522: 
+0523:         revisores = pd.Series([""] * len(df))
+0524: 
+0525: 
+0526: 
+0527:     # Completa revisor ausente com base nas duplas definidas
+0528: 
+0529:     def _rev_fallback(rel: str, rev: str) -> str:
+0530: 
+0531:         r = _ws(rev)
+0532: 
+0533:         if r and r != "-":
+0534: 
+0535:             return r
+0536: 
+0537:         key = _strip_accents_lower(_ws(rel))
+0538: 
+0539:         return _DUO_RELATOR_REVISOR.get(key, r)
+0540: 
+0541: 
+0542: 
+0543:     if not relatores.empty:
+0544: 
+0545:         revisores = pd.Series([
+0546: 
+0547:             _rev_fallback(rel, rev) for rel, rev in zip(relatores.tolist(), revisores.tolist())
+0548: 
+0549:         ])
+0550: 
+0551: 
+0552: 
+0553:     # MOTIVO (coluna 10) → flag de reinclusão
+0554: 
+0555:     if motivo_idx is not None and motivo_idx < len(df.columns):
+0556: 
+0557:         motivos = df.iloc[:, motivo_idx].apply(_ws)
+0558: 
+0559:     else:
+0560: 
+0561:         motivos = pd.Series([""] * len(df))
+0562: 
+0563:     is_reinc = motivos.apply(_is_reinclusao_text)
+0564: 
+0565: 
+0566: 
+0567:     out = pd.DataFrame(
+0568: 
+0569:         {
+0570: 
+0571:             "Relator": relatores.apply(_ws),
+0572: 
+0573:             "Revisor": revisores.apply(lambda s: _ws(s) if _ws(s) else "—"),
+0574: 
+0575:             "Processo": processos.apply(_ws),
+0576: 
+0577:             "Objeto": objetos.apply(_ws),
+0578: 
+0579:             "Motivo": motivos.apply(_ws),
+0580: 
+0581:             "IsReinc": is_reinc.astype(bool),
+0582: 
+0583:         }
+0584: 
+0585:     )
+0586: 
+0587: 
+0588: 
+0589:     # filtra linhas válidas
+0590: 
+0591:     out = out[(out["Processo"] != "") & (out["Objeto"] != "")]
+0592: 
+0593:     out["Fonte"] = path.name
+0594: 
+0595:     return out
+0596: 
+0597: 
+0598: 
+0599: 
+0600: 
+0601: def _coletar_planilhas(pasta_planilhas: str | Path) -> pd.DataFrame:
+0602: 
+0603:     pasta = Path(pasta_planilhas)
+0604: 
+0605:     arquivos = sorted([*pasta.glob("*.xlsx"), *pasta.glob("*.xls")])
+0606: 
+0607:     frames = []
+0608: 
+0609:     for arq in arquivos:
+0610: 
+0611:         try:
+0612: 
+0613:             frames.append(_ler_planilha(arq))
+0614: 
+0615:         except Exception as e:
+0616: 
+0617:             print(f"[docx] Aviso: falha ao ler {arq.name}: {e}")
+0618: 
+0619:     if not frames:
+0620: 
+0621:         return pd.DataFrame(columns=["Relator", "Revisor", "Processo", "Objeto", "Motivo", "IsReinc", "Fonte"])
+0622: 
+0623:     full = pd.concat(frames, ignore_index=True)
+0624: 
+0625: 
+0626: 
+0627:     # Ordena pela sequência padrão de relatores e, em seguida, por revisor e processo
+0628: 
+0629:     def _norm_name(n: str) -> str:
+0630: 
+0631:         return _strip_accents_lower(_ws(n))
+0632: 
+0633: 
+0634: 
+0635:     ordem_relatores = {
+0636: 
+0637:         # Ordem padrão (será substituída por composição específica em gerar_docx_unificado)
+0638: 
+0639:         "domingos dissei": 1,
+0640: 
+0641:         "ricardo torres": 2,
+0642: 
+0643:         "roberto braguim": 3,
+0644: 
+0645:         "joao antonio": 4,
+0646: 
+0647:         "eduardo tuma": 5,
+0648: 
+0649:     }
+0650: 
+0651: 
+0652: 
+0653:     full["_RelatorOrder"] = full["Relator"].map(lambda n: ordem_relatores.get(_norm_name(n), 999))
+0654: 
+0655:     full = (
+0656: 
+0657:         full
+0658: 
+0659:         .sort_values(by=["_RelatorOrder", "Relator", "Revisor", "Processo"], kind="stable")
+0660: 
+0661:         .reset_index(drop=True)
+0662: 
+0663:         .drop(columns=["_RelatorOrder"])
+0664: 
+0665:     )
+0666: 
+0667:     return full
+0668: 
+0669: 
+0670: 
+0671: 
+0672: 
+0673: def _open_document_from_template(header_template: str | Path | None) -> Document:
+0674: 
+0675:     here = Path(__file__).resolve().parent
+0676: 
+0677:     cwd = Path.cwd()
+0678: 
+0679:     candidates: list[Path] = []
+0680: 
+0681: 
+0682: 
+0683:     def push(p: Path):
+0684: 
+0685:         if p not in candidates:
+0686: 
+0687:             candidates.append(p)
+0688: 
+0689: 
+0690: 
+0691:     if header_template:
+0692: 
+0693:         hp = Path(header_template)
+0694: 
+0695:         push(hp)
+0696: 
+0697:         if not hp.is_absolute():
+0698: 
+0699:             push(cwd / hp)
+0700: 
+0701:             push(here / hp)
+0702: 
+0703:         if hp.suffix.lower() != ".docx":
+0704: 
+0705:             push(hp.with_suffix(".docx"))
+0706: 
+0707:         if hp.name.lower() == "papel_timbrado_tcm.docx":
+0708: 
+0709:             push(cwd / "papel_timbrado_tcm.docx.docx")
+0710: 
+0711:             push(here / "papel_timbrado_tcm.docx.docx")
+0712: 
+0713: 
+0714: 
+0715:     for n in [
+0716: 
+0717:         "papel_timbrado_tcm.docx",
+0718: 
+0719:         "papel_timbrado_tcm.docx.docx",
+0720: 
+0721:         "PAPEL TIMBRADO.docx",
+0722: 
+0723:         "PAPEL TIMBRADO.DOCX",
+0724: 
+0725:     ]:
+0726: 
+0727:         push(cwd / n)
+0728: 
+0729:         push(here / n)
+0730: 
+0731: 
+0732: 
+0733:     for p in candidates:
+0734: 
+0735:         try:
+0736: 
+0737:             if p.exists() and p.is_file():
+0738: 
+0739:                 print(f"[docx] Template candidato: {p}")
+0740: 
+0741:                 return Document(str(p))
+0742: 
+0743:         except PackageNotFoundError:
+0744: 
+0745:             print(f"[docx] Aviso: '{p}' não é um DOCX válido. Tentando próximo…")
+0746: 
+0747:         except Exception as e:
+0748: 
+0749:             print(f"[docx] Aviso: falha ao abrir '{p}': {e}. Tentando próximo…")
+0750: 
+0751: 
+0752: 
+0753:     print("[docx] Aviso: nenhum template válido encontrado. Gerando sem papel timbrado.")
+0754: 
+0755:     return Document()
+0756: 
+0757: 
+0758: 
+0759: 
+0760: 
+0761: def _fontify(run, size=12, small_caps=False, bold=False):
+0762: 
+0763:     f = run.font
+0764: 
+0765:     f.name = "Arial"
+0766: 
+0767:     f.size = Pt(size)
+0768: 
+0769:     f.small_caps = bool(small_caps)
+0770: 
+0771:     f.bold = bool(bold)
+0772: 
+0773: 
+0774: 
+0775: 
+0776: 
+0777: def _para_fmt(paragraph, align=WD_ALIGN_PARAGRAPH.JUSTIFY, before=6, after=6, line=1.15):
+0778: 
+0779:     pf = paragraph.paragraph_format
+0780: 
+0781:     paragraph.alignment = align
+0782: 
+0783:     pf.space_before = Pt(before)
+0784: 
+0785:     pf.space_after = Pt(after)
+0786: 
+0787:     pf.line_spacing = line
+0788: 
+0789: 
+0790: 
+0791: 
+0792: 
+0793: def _add_centered(doc: Document, texto: str, bold=False, size=12) -> None:
+0794: 
+0795:     p = doc.add_paragraph()
+0796: 
+0797:     _para_fmt(p, align=WD_ALIGN_PARAGRAPH.CENTER, before=6, after=6, line=1.15)
+0798: 
+0799:     run = p.add_run(texto)
+0800: 
+0801:     _fontify(run, size=size, small_caps=False, bold=bold)
+0802: 
+0803: 
+0804: 
+0805: 
+0806: 
+0807: def _add_item_paragraph(doc: Document, processo: str, objeto: str, idx: int | None = None) -> None:
+0808: 
+0809:     p = doc.add_paragraph()
+0810: 
+0811:     _para_fmt(p, align=WD_ALIGN_PARAGRAPH.JUSTIFY, before=0, after=6, line=1.15)
+0812: 
+0813: 
+0814: 
+0815:     if idx is not None:
+0816: 
+0817:         r_idx = p.add_run(f"{idx}) ")
+0818: 
+0819:         _fontify(r_idx, size=12, bold=True)
+0820: 
+0821: 
+0822: 
+0823:     r_proc = p.add_run(_ws(processo))
+0824: 
+0825:     _fontify(r_proc, size=12, bold=True)
+0826: 
+0827: 
+0828: 
+0829:     r_sep = p.add_run(" - ")
+0830: 
+0831:     _fontify(r_sep, size=12)
+0832: 
+0833: 
+0834: 
+0835:     _add_obj_with_highlights(p, _ws(objeto))
+0836: 
+0837: 
+0838: 
+0839: 
+0840: 
+0841: def _add_obj_with_highlights(paragraph, texto: str) -> None:
+0842: 
+0843:     """Renderiza o texto do objeto dividindo em runs e deixando termos-chave em negrito."""
+0844: 
+0845:     if not texto:
+0846: 
+0847:         r = paragraph.add_run("")
+0848: 
+0849:         _fontify(r, size=12)
+0850: 
+0851:         return
+0852: 
+0853: 
+0854: 
+0855:     # Destaca apenas a primeira ocorrência de cada termo (por label), sem sobreposição
+0856: 
+0857:     selected: list[tuple[int, int, str]] = []  # (start, end, label)
+0858: 
+0859:     used_labels: set[str] = set()
+0860: 
+0861:     def _overlaps(s: int, e: int) -> bool:
+0862: 
+0863:         for ss, ee, _ in selected:
+0864: 
+0865:             if not (e <= ss or s >= ee):
+0866: 
+0867:                 return True
+0868: 
+0869:         return False
+0870: 
+0871: 
+0872: 
+0873:     for label, pat in _OBJ_HL_PATTERNS:
+0874: 
+0875:         if label in used_labels:
+0876: 
+0877:             continue
+0878: 
+0879:         m = pat.search(texto)
+0880: 
+0881:         if not m:
+0882: 
+0883:             continue
+0884: 
+0885:         s, e = m.start(), m.end()
+0886: 
+0887:         if s >= 0 and e > s and not _overlaps(s, e):
+0888: 
+0889:             selected.append((s, e, label))
+0890: 
+0891:             used_labels.add(label)
+0892: 
+0893: 
+0894: 
+0895:     if not selected:
+0896: 
+0897:         r = paragraph.add_run(texto)
+0898: 
+0899:         _fontify(r, size=12)
+0900: 
+0901:         return
+0902: 
+0903: 
+0904: 
+0905:     # Ordena pelo índice de início
+0906: 
+0907:     selected.sort(key=lambda t: t[0])
+0908: 
+0909: 
+0910: 
+0911:     pos = 0
+0912: 
+0913:     for s, e, _ in selected:
+0914: 
+0915:         if pos < s:
+0916: 
+0917:             r = paragraph.add_run(texto[pos:s])
+0918: 
+0919:             _fontify(r, size=12)
+0920: 
+0921:         r = paragraph.add_run(texto[s:e])
+0922: 
+0923:         _fontify(r, size=12, bold=True)
+0924: 
+0925:         pos = e
+0926: 
+0927:     if pos < len(texto):
+0928: 
+0929:         r = paragraph.add_run(texto[pos:])
+0930: 
+0931:         _fontify(r, size=12)
+0932: 
+0933: 
+0934: 
+0935: 
+0936: 
+0937: _ROMANS = [
+0938: 
+0939:     (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+0940: 
+0941:     (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+0942: 
+0943:     (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+0944: 
+0945: ]
+0946: 
+0947: def _roman(n: int) -> str:
+0948: 
+0949:     if n <= 0:
+0950: 
+0951:         return str(n)
+0952: 
+0953:     out = []
+0954: 
+0955:     for val, sym in _ROMANS:
+0956: 
+0957:         while n >= val:
+0958: 
+0959:             out.append(sym)
+0960: 
+0961:             n -= val
+0962: 
+0963:     return "".join(out)
+0964: 
+0965: 
+0966: 
+0967: 
+0968: 
+0969: # =========================
+0970: 
+0971: # Cabeçalhos por tipo de sessão
+0972: 
+0973: # =========================
+0974: 
+0975: @dataclass
+0976: 
+0977: class SessionMeta:
+0978: 
+0979:     numero: str                 # ex: "71" ou "3.385"
+0980: 
+0981:     tipo: str                   # 'ordinaria' | 'extraordinaria'
+0982: 
+0983:     formato: str                # 'nao-presencial' | 'presencial'
+0984: 
+0985:     competencia: str            # 'pleno' | '1c' | '2c'
+0986: 
+0987:     data_abertura: str          # "DD/MM/AAAA" (NP) OU data da realização (presencial)
+0988: 
+0989:     data_encerramento: str = "" # só NP (se vazio, calcula +15 dias)
+0990: 
+0991:     horario: str = "9h30min."   # só presencial
+0992: 
+0993:     local: str = ("NO PLENÁRIO DO EDIFÍCIO PREFEITO FARIA LIMA E COM TRANSMISSÃO AO VIVO "
+0994: 
+0995:                   "PELO CANAL TV TCMSP NO YOUTUBE.")
+0996: 
+0997: 
+0998: 
+0999:     def normalizar(self):
+1000: 
+1001:         self.tipo = self.tipo.strip().lower()
+1002: 
+1003:         self.formato = self.formato.strip().lower().replace("ã", "a").replace("á", "a")
+1004: 
+1005:         self.formato = {"nao presencial":"nao-presencial", "nao-presencial":"nao-presencial",
+1006: 
+1007:                         "presencial":"presencial"}.get(self.formato, self.formato)
+1008: 
+1009:         self.competencia = self.competencia.strip().lower()
+1010: 
+1011:         # garante 'ª'
+1012: 
+1013:         if "ª" not in self.numero:
+1014: 
+1015:             try:
+1016: 
+1017:                 int(self.numero.replace(".", ""))
+1018: 
+1019:                 self.numero = f"{self.numero}ª"
+1020: 
+1021:             except Exception:
+1022: 
+1023:                 pass
+1024: 
+1025:         # calcula encerramento se NP
+1026: 
+1027:         if self.formato == "nao-presencial" and not self.data_encerramento:
+1028: 
+1029:             try:
+1030: 
+1031:                 d0 = datetime.strptime(self.data_abertura, "%d/%m/%Y")
+1032: 
+1033:                 self.data_encerramento = (d0 + timedelta(days=15)).strftime("%d/%m/%Y")
+1034: 
+1035:             except Exception:
+1036: 
+1037:                 self.data_encerramento = ""
+1038: 
+1039: 
+1040: 
+1041: 
+1042: 
+1043: def _meta_from_env() -> Optional[SessionMeta]:
+1044: 
+1045:     import os
+1046: 
+1047:     tipo = os.getenv("TCM_META_TIPO", "").strip()
+1048: 
+1049:     formato = os.getenv("TCM_META_FORMATO", "").strip()
+1050: 
+1051:     comp = os.getenv("TCM_META_COMPETENCIA", "").strip()
+1052: 
+1053:     num = os.getenv("TCM_META_NUMERO", "").strip()
+1054: 
+1055:     d_ab = os.getenv("TCM_META_DATA_ABERTURA", "").strip()
+1056: 
+1057:     d_en = os.getenv("TCM_META_DATA_ENCERRAMENTO", "").strip()
+1058: 
+1059:     hr   = os.getenv("TCM_META_HORARIO", "").strip() or "9h30min."
+1060: 
+1061:     if not (tipo and formato and comp and num and d_ab):
+1062: 
+1063:         return None
+1064: 
+1065:     meta = SessionMeta(numero=num, tipo=tipo, formato=formato, competencia=comp,
+1066: 
+1067:                        data_abertura=d_ab, data_encerramento=d_en, horario=hr)
+1068: 
+1069:     meta.normalizar()
+1070: 
+1071:     return meta
+1072: 
+1073: 
+1074: 
+1075: 
+1076: 
+1077: def _texto_competencia(meta: SessionMeta) -> str:
+1078: 
+1079:     if meta.competencia in ("1c", "1ª", "1a", "1º", "primeira", "1ª camara", "1a camara"):
+1080: 
+1081:         return "1ª CÂMARA"
+1082: 
+1083:     if meta.competencia in ("2c", "2ª", "2a", "2º", "segunda", "2ª camara", "2a camara"):
+1084: 
+1085:         return "2ª CÂMARA"
+1086: 
+1087:     return "PLENO"
+1088: 
+1089: 
+1090: 
+1091: 
+1092: 
+1093: def _montar_intro(meta: SessionMeta) -> str:
+1094: 
+1095:     tipo_up = "ORDINÁRIA" if meta.tipo.startswith("ordin") else "EXTRAORDINÁRIA"
+1096: 
+1097:     if meta.formato == "nao-presencial":
+1098: 
+1099:         artigo = "art.153-A" if meta.tipo.startswith("ordin") else "art.153-b c/c art. 153 § 5º"
+1100: 
+1101:         enc = f" e o encerramento previsto para 15 dias corridos ({meta.data_encerramento})." if meta.data_encerramento else "."
+1102: 
+1103:         return (
+1104: 
+1105:             f"PAUTA DA {meta.numero} SESSÃO {tipo_up} NÃO PRESENCIAL DO TRIBUNAL DE CONTAS "
+1106: 
+1107:             f"DO MUNICÍPIO DE SÃO PAULO, nos termos do {artigo} do Regimento Interno do "
+1108: 
+1109:             f"TCMSP, cuja abertura está designada para o dia {meta.data_abertura}{enc} "
+1110: 
+1111:             f"Aplicam-se, no que couber, as disposições da Resolução n.º 07/2019 e da "
+1112: 
+1113:             f"Instrução n.º 01/2019."
+1114: 
+1115:         )
+1116: 
+1117:     else:
+1118: 
+1119:         comp_txt = _texto_competencia(meta)
+1120: 
+1121:         if comp_txt == "PLENO":
+1122: 
+1123:             return (
+1124: 
+1125:                 f"PAUTA DA {meta.numero} SESSÃO {tipo_up} DO TRIBUNAL DE CONTAS DO MUNICÍPIO DE "
+1126: 
+1127:                 f"SÃO PAULO, A REALIZAR-SE NO DIA {meta.data_abertura}, ÀS {meta.horario}, "
+1128: 
+1129:                 f"{meta.local}"
+1130: 
+1131:             )
+1132: 
+1133:         else:
+1134: 
+1135:             return (
+1136: 
+1137:                 f"PAUTA DA {meta.numero} SESSÃO {tipo_up} DA {comp_txt} DO TRIBUNAL DE CONTAS "
+1138: 
+1139:                 f"DO MUNICÍPIO DE SÃO PAULO, A REALIZAR-SE NO DIA {meta.data_abertura}, ÀS "
+1140: 
+1141:                 f"{meta.horario}, {meta.local}"
+1142: 
+1143:             )
+1144: 
+1145: 
+1146: 
+1147: 
+1148: 
+1149: def _add_intro_from_meta(doc: Document, meta: SessionMeta) -> None:
+1150: 
+1151:     # Centraliza "PAUTA" na primeira linha (em negrito),
+1152: 
+1153:     # e coloca o restante do texto introdutório no parágrafo seguinte.
+1154: 
+1155:     intro = _montar_intro(meta)
+1156: 
+1157:     head = "PAUTA"
+1158: 
+1159:     rest = intro
+1160: 
+1161:     if intro.upper().startswith("PAUTA "):
+1162: 
+1163:         rest = intro[len("PAUTA "):].lstrip()
+1164: 
+1165: 
+1166: 
+1167:     _add_centered(doc, head, bold=True, size=14)
+1168: 
+1169: 
+1170: 
+1171:     p = doc.add_paragraph()
+1172: 
+1173:     _para_fmt(p, align=WD_ALIGN_PARAGRAPH.JUSTIFY, before=0, after=10, line=1.15)
+1174: 
+1175:     run = p.add_run(rest)
+1176: 
+1177:     _fontify(run, size=12)
+1178: 
+1179:     _add_centered(doc, "- I -", bold=True, size=12)
+1180: 
+1181:     _add_centered(doc, "ORDEM DO DIA", bold=True, size=12)
+1182: 
+1183:     doc.add_paragraph("")
+1184: 
+1185:     _add_centered(doc, "- II -", bold=True, size=12)
+1186: 
+1187:     _add_centered(doc, "JULGAMENTOS", bold=True, size=12)
+1188: 
+1189: 
+1190: 
+1191: 
+1192: 
+1193: def _add_intro_padrao(doc: Document, titulo: Optional[str]) -> None:
+1194: 
+1195:     _add_centered(doc, "PAUTA", bold=True, size=14)
+1196: 
+1197:     intro = (
+1198: 
+1199:         "DA SESSÃO ORDINÁRIA NÃO PRESENCIAL DO TRIBUNAL DE CONTAS DO MUNICÍPIO DE SÃO PAULO, "
+1200: 
+1201:         "nos termos das disposições da Resolução n.º 07/2019 e da Instrução n.º 01/2019."
+1202: 
+1203:     )
+1204: 
+1205:     p = doc.add_paragraph(intro)
+1206: 
+1207:     _para_fmt(p, align=WD_ALIGN_PARAGRAPH.JUSTIFY, before=0, after=8, line=1.15)
+1208: 
+1209:     _fontify(p.runs[0] if p.runs else p.add_run(""), size=12)
+1210: 
+1211:     _add_centered(doc, "- I -", bold=True, size=12)
+1212: 
+1213:     _add_centered(doc, "ORDEM DO DIA", bold=True, size=12)
+1214: 
+1215:     doc.add_paragraph("")
+1216: 
+1217:     _add_centered(doc, "- II -", bold=True, size=12)
+1218: 
+1219:     _add_centered(doc, "JULGAMENTOS", bold=True, size=12)
+1220: 
+1221: 
+1222: 
+1223: 
+1224: 
+1225: # =========================
+1226: 
+1227: # Geração do DOCX
+1228: 
+1229: # =========================
+1230: 
+1231: def gerar_docx_unificado(
+1232: 
+1233:     pasta_planilhas: str | Path,
+1234: 
+1235:     saida_docx: str | Path,
+1236: 
+1237:     titulo: str | None = None,
+1238: 
+1239:     header_template: str | Path | None = None,
+1240: 
+1241:     meta_sessao: SessionMeta | None = None,
+1242: 
+1243: ) -> str:
+1244: 
+1245:     df = _coletar_planilhas(pasta_planilhas)
+1246: 
+1247:     if df.empty:
+1248: 
+1249:         raise RuntimeError("Nenhuma planilha válida encontrada para unificação.")
+1250: 
+1251: 
+1252: 
+1253:     doc = _open_document_from_template(header_template)
+1254: 
+1255: 
+1256: 
+1257:     # Cabeçalho contextual (se houver meta) ou padrão
+1258: 
+1259:     if meta_sessao is None:
+1260: 
+1261:         env_meta = _meta_from_env()
+1262: 
+1263:         meta_sessao = env_meta
+1264: 
+1265:     if meta_sessao:
+1266: 
+1267:         meta_sessao.normalizar()
+1268: 
+1269:         _add_intro_from_meta(doc, meta_sessao)
+1270: 
+1271:     else:
+1272: 
+1273:         _add_intro_padrao(doc, titulo)
+1274: 
+1275: 
+1276: 
+1277:     # Reordena os relatores conforme a composição da sessão
+1278: 
+1279:     def _ordem_por_competencia(comp: Optional[str]) -> dict:
+1280: 
+1281:         comp = (comp or "").strip().lower()
+1282: 
+1283:         if comp == "1c":
+1284: 
+1285:             base = [
+1286: 
+1287:                 "domingos dissei",
+1288: 
+1289:                 "ricardo torres",
+1290: 
+1291:                 "roberto braguim",
+1292: 
+1293:             ]
+1294: 
+1295:         elif comp == "2c":
+1296: 
+1297:             base = [
+1298: 
+1299:                 "ricardo torres",
+1300: 
+1301:                 "joao antonio",
+1302: 
+1303:                 "eduardo tuma",
+1304: 
+1305:             ]
+1306: 
+1307:         else:  # 'pleno' ou qualquer outro
+1308: 
+1309:             base = [
+1310: 
+1311:                 "domingos dissei",
+1312: 
+1313:                 "ricardo torres",
+1314: 
+1315:                 "roberto braguim",
+1316: 
+1317:                 "joao antonio",
+1318: 
+1319:                 "eduardo tuma",
+1320: 
+1321:             ]
+1322: 
+1323:         return {name: i + 1 for i, name in enumerate(base)}
+1324: 
+1325: 
+1326: 
+1327:     ordem_map = _ordem_por_competencia(getattr(meta_sessao, "competencia", None))
+1328: 
+1329:     df["__RelatorOrder"] = df["Relator"].map(lambda n: ordem_map.get(_strip_accents_lower(_ws(n)), 999))
+1330: 
+1331: 
+1332: 
+1333:     # Prioridade fixa de revisores dentro de cada relator
+1334: 
+1335:     # Ordem solicitada: 1) Vice-Presidente Ricardo Torres; 2) Corregedor Roberto Braguim;
+1336: 
+1337:     # 3) (demais) – mantemos Joao Antonio; 4) Conselheiro Eduardo Tuma; demais depois.
+1338: 
+1339:     rev_order = {
+1340: 
+1341:         "ricardo torres": 1,
+1342: 
+1343:         "roberto braguim": 2,
+1344: 
+1345:         "joao antonio": 3,
+1346: 
+1347:         "eduardo tuma": 4,
+1348: 
+1349:     }
+1350: 
+1351:     df["__RevisorOrder"] = df["Revisor"].map(lambda n: rev_order.get(_strip_accents_lower(_ws(n)), 999))
+1352: 
+1353:     df = (
+1354: 
+1355:         df.sort_values(by=["__RelatorOrder", "Relator", "__RevisorOrder", "Revisor", "Processo"], kind="stable")
+1356: 
+1357:           .reset_index(drop=True)
+1358: 
+1359:           .drop(columns=["__RelatorOrder", "__RevisorOrder"])
+1360: 
+1361:     )
+1362: 
+1363: 
+1364: 
+1365: 
+1366: 
+1367:     # Função para rotular o cargo do revisor no título
+1368: 
+1369:     def _cargo_revisor(nome: str) -> str:
+1370: 
+1371:         k = _strip_accents_lower(_ws(nome))
+1372: 
+1373:         if k == "ricardo torres":
+1374: 
+1375:             return "VICE-PRESIDENTE"
+1376: 
+1377:         if k == "roberto braguim":
+1378: 
+1379:             return "CONSELHEIRO CORREGEDOR"
+1380: 
+1381:         return "CONSELHEIRO"
+1382: 
+1383: 
+1384: 
+1385:     # ==== Passo 1: itens NÃO reinclusão (IsReinc == False) ====
+1386: 
+1387:     df_main = df[df["IsReinc"] == False]
+1388: 
+1389:     roman_counter = 1
+1390: 
+1391:     for relator, bloco_relator in df_main.groupby("Relator", sort=False):
+1392: 
+1393:         # Título do RELATOR (ALINHADO À ESQUERDA)
+1394: 
+1395:         cargo = _cargo_conselheiro(relator)
+1396: 
+1397: 
+1398: 
+1399:         rotulo_relator = f\"{_roman(roman_counter)} - RELATOR {cargo} {relator}\".upper()
+1400: 
+1401:         p_rel = doc.add_paragraph()
+1402: 
+1403:         _para_fmt(p_rel, align=WD_ALIGN_PARAGRAPH.LEFT, before=8, after=6, line=1.0)
+1404: 
+1405:         run_rel = p_rel.add_run(rotulo_relator)
+1406: 
+1407:         _fontify(run_rel, size=12, bold=True)
+1408: 
+1409:         roman_counter += 1
+1410: 
+1411: 
+1412: 
+1413:         # Dentro do relator: agrupar por REVISOR (com letras APENAS se houver >1 revisor)
+1414: 
+1415:         groups = list(bloco_relator.groupby("Revisor", sort=False))
+1416: 
+1417:         multi = len(groups) > 1
+1418: 
+1419:         for idx, (revisor, bloco_revisor) in enumerate(groups, start=1):
+1420: 
+1421:             prefix = f"{_alpha(idx)} - " if multi else ""
+1422: 
+1423:             subt = doc.add_paragraph()
+1424: 
+1425:             _para_fmt(subt, align=WD_ALIGN_PARAGRAPH.LEFT, before=4, after=2, line=1.0)
+1426: 
+1427:             cargo = _cargo_revisor(revisor)
+1428: 
+1429: 
+1430: 
+1431:             run_sub = subt.add_run(f"{prefix}REVISOR {cargo} {revisor}")
+1432: 
+1433:             _fontify(run_sub, size=12, bold=True)
+1434: 
+1435: 
+1436: 
+1437:             for i, row in enumerate(bloco_revisor.itertuples(index=False), start=1):
+1438: 
+1439:                 _add_item_paragraph(doc, row.Processo, row.Objeto, idx=i)
+1440: 
+1441: 
+1442: 
+1443:             doc.add_paragraph("")  # espaçamento entre revisores
+1444: 
+1445: 
+1446: 
+1447:         doc.add_paragraph("")  # espaço entre relatores
+1448: 
+1449: 
+1450: 
+1451:     # ==== Passo 2: REINCLUSÕES ao final (IsReinc == True) ====
+1452: 
+1453:     df_reinc = df[df["IsReinc"] == True]
+1454: 
+1455:     if not df_reinc.empty:
+1456: 
+1457:         _add_centered(doc, "- REINCLUSÕES -", bold=True, size=12)
+1458: 
+1459:         doc.add_paragraph("")
+1460: 
+1461: 
+1462: 
+1463:         for relator, bloco_relator in df_reinc.groupby("Relator", sort=False):
+1464: 
+1465:             cargo = _cargo_conselheiro(relator)
+1466: 
+1467: 
+1468: 
+1469:             rotulo_relator = f\"{_roman(roman_counter)} - RELATOR {cargo} {relator}\".upper()
+1470: 
+1471:             p_rel = doc.add_paragraph()
+1472: 
+1473:             _para_fmt(p_rel, align=WD_ALIGN_PARAGRAPH.LEFT, before=8, after=6, line=1.0)
+1474: 
+1475:             run_rel = p_rel.add_run(rotulo_relator)
+1476: 
+1477:             _fontify(run_rel, size=12, bold=True)
+1478: 
+1479:             roman_counter += 1
+1480: 
+1481: 
+1482: 
+1483:             groups = list(bloco_relator.groupby("Revisor", sort=False))
+1484: 
+1485:             multi = len(groups) > 1
+1486: 
+1487:             for idx, (revisor, bloco_revisor) in enumerate(groups, start=1):
+1488: 
+1489:                 prefix = f"{_alpha(idx)} - " if multi else ""
+1490: 
+1491:                 subt = doc.add_paragraph()
+1492: 
+1493:                 _para_fmt(subt, align=WD_ALIGN_PARAGRAPH.LEFT, before=4, after=2, line=1.0)
+1494: 
+1495:                 cargo = _cargo_revisor(revisor)
+1496: 
+1497: 
+1498: 
+1499:                 run_sub = subt.add_run(f"{prefix}REVISOR {cargo} {revisor}")
+1500: 
+1501:                 _fontify(run_sub, size=12, bold=True)
+1502: 
+1503: 
+1504: 
+1505:                 for i, row in enumerate(bloco_revisor.itertuples(index=False), start=1):
+1506: 
+1507:                     _add_item_paragraph(doc, row.Processo, row.Objeto, idx=i)
+1508: 
+1509: 
+1510: 
+1511:                 doc.add_paragraph("")
+1512: 
+1513: 
+1514: 
+1515:             doc.add_paragraph("")
+1516: 
+1517: 
+1518: 
+1519:     out_path = Path(saida_docx)
+1520: 
+1521:     out_path.parent.mkdir(parents=True, exist_ok=True)
+1522: 
+1523:     doc.save(str(out_path))
+1524: 
+1525:     return str(out_path)
+1526: 
+1527: 

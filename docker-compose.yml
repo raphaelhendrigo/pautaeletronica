@@ -1,0 +1,32 @@
+version: "3.9"
+services:
+  pauta:
+    build: .
+    image: pauta-automation:latest
+    ports:
+      - "8080:8080"
+    environment:
+      TZ: America/Sao_Paulo
+      BASE_URL: "https://etcm.tcm.sp.gov.br"
+      ETCM_USER: "20386"
+      ETCM_PASS: "rhg#1004"
+      SESSAO: "71"
+      DATA_DE: "29/09/2025"
+      DATA_ATE: "29/10/2025"
+      HEADER_TEMPLATE: "papel_timbrado_tcm.docx"
+      DOWNLOAD_DIR: "/workspace/downloads"
+      OUTPUT_DIR: "/workspace/output"
+      HEADLESS: "true"
+
+      # SMTP (Office 365; ajuste se necessário)
+      SMTP_HOST: "smtp.office365.com"
+      SMTP_PORT: "587"
+      SMTP_USER: "raphael.goncalves@tcmsp.tc.br"
+      SMTP_PASS: "rhg#1004"
+      EMAIL_SENDER: "raphael.goncalves@tcmsp.tc.br"
+      EMAIL_TO: "raphael.goncalves@tcmsp.tc.br"
+      EMAIL_SUBJECT: "TESTE – Pauta SONP 71 gerada automaticamente (Docker local)"
+      EMAIL_BODY: "<p>Envio automático de <b>teste</b> via Docker local.</p>"
+
+    volumes:
+      - ./papel_timbrado_tcm.docx:/app/papel_timbrado_tcm.docx:ro

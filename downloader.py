@@ -352,7 +352,12 @@ def baixar_planilhas_sessao(
 
     # Abre popup da sessão e obtém o iframe da SONP
     _clicar_botao_consulta_da_pauta(page, num_sessao, "2025")
-    sonp_frame = _esperar_iframe_sonp(page, timeout_ms=35000)
+    try:
+        sonp_frame = _esperar_iframe_sonp(page, timeout_ms=35000)
+    except RuntimeError:
+        # Fallback: operate on current page (no iframe)
+        print("[info] Iframe da SONP nao detectado; operando na pagina atual.")
+        sonp_frame = page
 
     # Lista dinâmica de conselheiros
     nomes = _listar_conselheiros(sonp_frame)

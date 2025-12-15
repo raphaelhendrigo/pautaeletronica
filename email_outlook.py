@@ -1,12 +1,13 @@
 # email_outlook.py
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional, List, Tuple
 from datetime import datetime
 import time
 import os
+import json
 
 try:
     import win32com.client as win32
@@ -30,6 +31,112 @@ class SendResult:
     online_before: Optional[str]
     online_after: Optional[str]
     attachment: Optional[str]
+    recipient_status: List["RecipientStatus"]
+    log_path: Optional[str]
+
+
+@dataclass
+class RecipientStatus:
+    original: str
+    recipient_type: str
+    resolved: bool
+    address: Optional[str]
+    display: Optional[str]
+    reason: Optional[str]
+
+
+def _recipient_type_label(type_code: int) -> str:
+    return {1: "TO", 2: "CC", 3: "BCC"}.get(type_code, f"TYPE_{type_code}")
+
+
+def _collect_recipient_statuses(mail_item, requested: List[dict]) -> List[RecipientStatus]:
+    """
+    Captura o status de cada destinatário já adicionado ao mail_item.
+    `requested` preserva a ordem e endereço original usados na adição.
+    """
+    statuses: List[RecipientStatus] = []
+    try:
+        recipients = mail_item.Recipients
+        total = int(recipients.Count)
+    except Exception:
+        recipients = None
+        total = 0
+
+    loop_total = max(total, len(requested))
+
+    for idx in range(loop_total):
+        info = requested[idx] if idx < len(requested) else None
+        original = (info or {}).get("address", "")
+        try:
+            recipient = recipients.Item(idx + 1) if recipients and idx < total else None
+        except Exception:
+            recipient = None
+
+        resolved = False
+        address = None
+        display = None
+        r_type = (info or {}).get("type") or None
+        reason = None
+
+        if recipient is not None:
+            try:
+                resolved = bool(getattr(recipient, "Resolved", False))
+            except Exception:
+                resolved = False
+            try:
+                display = str(getattr(recipient, "Name", "") or "") or None
+            except Exception:
+                display = None
+            try:
+                address = str(getattr(recipient, "Address", "") or "") or None
+                if not address:
+                    addr_entry = getattr(recipient, "AddressEntry", None)
+                    if addr_entry is not None:
+                        address = str(getattr(addr_entry, "Address", "") or "") or None
+            except Exception:
+                address = address or None
+            try:
+                if r_type is None:
+                    r_type = _recipient_type_label(int(getattr(recipient, "Type", 0)))
+            except Exception:
+                pass
+
+        if r_type is None and info:
+            r_type = info.get("type")
+        if r_type is None:
+            r_type = "TO"
+
+        if recipient is None:
+            reason = "Destinatário não foi adicionado ao item de e-mail. O endereço pode estar inválido."
+        elif not resolved:
+            reason = "Outlook não conseguiu resolver este destinatário. Verifique o endereço ou catálogo."
+
+        statuses.append(
+            RecipientStatus(
+                original=original,
+                recipient_type=r_type,
+                resolved=bool(resolved),
+                address=address,
+                display=display,
+                reason=reason,
+            )
+        )
+    return statuses
+
+
+def _ensure_logs_dir() -> Path:
+    base = Path(__file__).resolve().parent
+    log_dir = base / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
+def _append_email_log(entry: dict) -> Path:
+    log_dir = _ensure_logs_dir()
+    log_path = log_dir / "email_delivery.log"
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return log_path
 
 
 # ---------- util ----------
@@ -244,6 +351,30 @@ def send_pauta_unificada(
     bcc_list = _split_addrs(bcc or "")
 
     m = app.CreateItem(0)  # olMailItem
+    requested_recipients: List[dict] = []
+
+    def _add_recipients(values: List[str], type_code: int):
+        type_label = _recipient_type_label(type_code)
+        for addr in values:
+            addr_clean = addr.strip()
+            if not addr_clean:
+                continue
+            added = False
+            try:
+                recipient = m.Recipients.Add(addr_clean)
+                if recipient is not None:
+                    try:
+                        recipient.Type = type_code
+                    except Exception:
+                        pass
+                    added = True
+            except Exception:
+                recipient = None
+            requested_recipients.append({"type": type_label, "address": addr_clean, "added": added})
+
+    _add_recipients(to_list, 1)
+    _add_recipients(cc_list, 2)
+    _add_recipients(bcc_list, 3)
 
     # Conta a usar (e capturar nome ANTES do Send)
     account_display = None
@@ -293,13 +424,6 @@ def send_pauta_unificada(
     html_body = body or _default_body(sessao)
     m.HTMLBody = html_body
 
-    if to_list:
-        m.To = "; ".join(to_list)
-    if cc_list:
-        m.CC = "; ".join(cc_list)
-    if bcc_list:
-        m.BCC = "; ".join(bcc_list)
-
     m.Attachments.Add(str(attach_abs))
 
     # resolve recipientes ANTES do send
@@ -309,44 +433,92 @@ def send_pauta_unificada(
         if verbose:
             print(f"[email] Recipients.ResolveAll() => {recipients_ok}")
     except Exception:
-        pass
+        recipients_ok = False
+
+    recipient_statuses = _collect_recipient_statuses(m, requested_recipients)
 
     entry_id = None  # só teremos em rascunho/salvo
 
-    if preview:
-        if verbose:
-            print("[email] Abrindo pré-visualização (não envia).")
-        m.Display(False)
-        try:
-            entry_id = getattr(m, "EntryID", None)
-        except Exception:
-            entry_id = None
-        status = "preview"
-    elif save_to_drafts:
-        if verbose:
-            print("[email] Salvando em Rascunhos.")
-        m.Save()
-        try:
-            entry_id = getattr(m, "EntryID", None)
-        except Exception:
-            entry_id = None
-        status = "drafts"
-    else:
-        if verbose:
-            print("[email] Enviando…")
-        m.Send()
-        status = "sent"
+    log_data = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "sessao": sessao,
+        "subject": m.Subject,
+        "attachment": str(attach_abs),
+        "requested_recipients": requested_recipients,
+        "recipient_status": [asdict(rs) for rs in recipient_statuses],
+        "failed_recipients": [rs.original for rs in recipient_statuses if not rs.resolved],
+        "recipients_resolved": bool(recipients_ok),
+        "account": account_display,
+        "account_hint": account_hint,
+        "preview": bool(preview),
+        "save_to_drafts": bool(save_to_drafts),
+        "force_sync": bool(force_sync),
+    }
+    log_path: Optional[str] = None
+    send_status = None
+    send_error: Optional[str] = None
 
-    if force_sync:
-        _force_sync(ns, verbose=verbose)
-        time.sleep(2)
+    outbox_after = outbox_before
+    sent_after = sent_before
+    online_after = online_before
 
-    outbox_after, sent_after = _folder_counts(ns)
-    online_after = _online_state(ns)
+    try:
+        if preview:
+            if verbose:
+                print("[email] Abrindo pré-visualização (não envia).")
+            m.Display(False)
+            try:
+                entry_id = getattr(m, "EntryID", None)
+            except Exception:
+                entry_id = None
+            send_status = "preview"
+        elif save_to_drafts:
+            if verbose:
+                print("[email] Salvando em Rascunhos.")
+            m.Save()
+            try:
+                entry_id = getattr(m, "EntryID", None)
+            except Exception:
+                entry_id = None
+            send_status = "drafts"
+        else:
+            if verbose:
+                print("[email] Enviando…")
+            m.Send()
+            send_status = "sent"
+
+        if force_sync:
+            _force_sync(ns, verbose=verbose)
+            time.sleep(2)
+    except Exception as e:
+        send_error = f"{type(e).__name__}: {e}"
+        send_status = send_status or "error"
+        if verbose:
+            print(f"[email] Erro ao enviar: {send_error}")
+        raise
+    finally:
+        outbox_after, sent_after = _folder_counts(ns)
+        online_after = _online_state(ns)
+        log_data["outbox_before"] = outbox_before
+        log_data["outbox_after"] = outbox_after
+        log_data["sent_before"] = sent_before
+        log_data["sent_after"] = sent_after
+        log_data["online_before"] = online_before
+        log_data["online_after"] = online_after
+        log_data["entry_id"] = entry_id
+        log_data["status"] = send_status or ("error" if send_error else "unknown")
+        if send_error:
+            log_data["error"] = send_error
+        try:
+            log_path = _append_email_log(log_data)
+        except Exception as log_exc:
+            log_path = None
+            if verbose:
+                print(f"[email] Não foi possível gravar o log de envio: {log_exc}")
 
     # IMPORTANTE: não tocar mais no objeto m após Send() para evitar "item movido/excluído".
     return SendResult(
-        status=status,
+        status=send_status or "unknown",
         account=account_display,
         recipients_resolved=bool(recipients_ok),
         entry_id=entry_id,
@@ -357,4 +529,6 @@ def send_pauta_unificada(
         online_before=online_before,
         online_after=online_after,
         attachment=str(attach_abs),
+        recipient_status=recipient_statuses,
+        log_path=str(log_path) if log_path else None,
     )

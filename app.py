@@ -213,6 +213,15 @@ def main():
         print(f"[email] sent_before={result.sent_before} -> sent_after={result.sent_after}")
         print(f"[email] online_before={result.online_before} -> online_after={result.online_after}")
         print(f"[email] anexado: {result.attachment}")
+        if result.log_path:
+            print(f"[email] log registrado em: {result.log_path}")
+        unresolved = [r for r in result.recipient_status if not r.resolved]
+        if unresolved:
+            print("[email][aviso] Destinatários não resolvidos:")
+            for item in unresolved:
+                who = item.original or item.display or item.address or "(desconhecido)"
+                reason = item.reason or "Motivo não informado."
+                print(f"  - {who}: {reason}")
 
 
 if __name__ == "__main__":

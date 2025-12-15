@@ -12,10 +12,12 @@ ENV/
 # Environment and secrets
 .env
 .env.*
+!.env.example
 
 # Logs and outputs
 logs/
 output/
+debug_*.txt
 
 # Local data (downloaded spreadsheets)
 planilhas*/
@@ -29,4 +31,3 @@ Thumbs.db
 desktop.ini
 .DS_Store
 *.tmp
-

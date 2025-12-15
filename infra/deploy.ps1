@@ -43,17 +43,22 @@ $OutputDir        = "/workspace/output"
 # SMTP (Office 365) – senha via Secret Manager
 $SmtpHost         = "smtp.office365.com"
 $SmtpPort         = "587"
-$SmtpUser         = "raphael.goncalves@tcmsp.tc.br"
-$SmtpPassValue    = 'rhg#1004'
+$SmtpUser         = if ($env:SMTP_USER) { $env:SMTP_USER } elseif ($env:TCM_SMTP_USER) { $env:TCM_SMTP_USER } else { "" }
+$SmtpPassValue    = if ($env:SMTP_PASS) { $env:SMTP_PASS } elseif ($env:TCM_SMTP_PASS) { $env:TCM_SMTP_PASS } else { "" }
 
-$EmailSender      = "raphael.goncalves@tcmsp.tc.br"
-$EmailTo          = "raphael.goncalves@tcmsp.tc.br"
+$EmailSender      = if ($env:EMAIL_SENDER) { $env:EMAIL_SENDER } elseif ($SmtpUser) { $SmtpUser } else { "" }
+$EmailTo          = if ($env:EMAIL_TO) { $env:EMAIL_TO } elseif ($EmailSender) { $EmailSender } else { "" }
 $EmailSubject     = "TESTE – Pauta SONP 71 gerada automaticamente (GCP)"
 $EmailBody        = "<p>Envio automático de <b>teste</b> pós-deploy pelo GCP.</p>"
 
 # e-TCM (via Secret)
-$EtcmUserValue    = "20386"
-$EtcmPassValue    = 'rhg#1004'
+$EtcmUserValue    = if ($env:ETCM_USER) { $env:ETCM_USER } else { "" }
+$EtcmPassValue    = if ($env:ETCM_PASS) { $env:ETCM_PASS } else { "" }
+
+Assert-NonEmpty $EtcmUserValue 'ETCM_USER'
+Assert-NonEmpty $EtcmPassValue 'ETCM_PASS'
+Assert-NonEmpty $SmtpUser      'SMTP_USER'
+Assert-NonEmpty $SmtpPassValue 'SMTP_PASS'
 
 # =========================
 # Resolver projeto

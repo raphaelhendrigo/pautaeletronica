@@ -280,6 +280,14 @@ def _ler_planilha(path: Path) -> pd.DataFrame:
 
     processos = df.iloc[:, proc_idx].apply(_ws)
     objetos = df.iloc[:, obj_idx].apply(_ws)
+    # Algumas planilhas trazem o texto apenas na coluna "Assunto" (objeto vazio).
+    assunto_alt = None
+    for idx, col in enumerate(df.columns):
+        if "assunto" in col.lower():
+            assunto_alt = df.iloc[:, idx].apply(_ws)
+            break
+    if assunto_alt is not None:
+        objetos = objetos.where(objetos != "", assunto_alt)
 
     # RELATOR (coluna 7; se vazio, extrai do nome do arquivo)
     if relator_idx is not None and relator_idx < len(df.columns):

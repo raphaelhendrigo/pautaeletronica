@@ -8,6 +8,7 @@ from datetime import datetime
 import time
 import os
 import json
+import shutil
 
 try:
     import win32com.client as win32
@@ -181,7 +182,20 @@ def _default_body(sessao: Optional[str]) -> str:
 
 # ---------- Outlook helpers ----------
 def _get_app_ns():
-    app = win32.gencache.EnsureDispatch("Outlook.Application")
+    try:
+        app = win32.gencache.EnsureDispatch("Outlook.Application")
+    except AttributeError as e:
+        # Corrige cache corrompido do gen_py (erro CLSIDToClassMap ausente).
+        if "CLSIDToClassMap" not in str(e):
+            raise
+        try:
+            import win32com.client.gencache as gencache
+            gen_path = gencache.GetGeneratePath()
+            if gen_path and os.path.isdir(gen_path):
+                shutil.rmtree(gen_path, ignore_errors=True)
+        except Exception:
+            pass
+        app = win32.gencache.EnsureDispatch("Outlook.Application")
     ns = app.GetNamespace("MAPI")
     return app, ns
 
@@ -241,6 +255,49 @@ def _force_sync(ns, verbose=False):
     except Exception as e:
         if verbose:
             print(f"[email][sync] SyncObjects falhou: {e}")
+
+
+def _set_receipt_requests(mail_item, request_read_receipt: bool, request_delivery_receipt: bool, verbose=False) -> dict:
+    info = {
+        "read_receipt_requested": bool(request_read_receipt),
+        "delivery_receipt_requested": bool(request_delivery_receipt),
+        "read_receipt_set": None,
+        "delivery_receipt_set": None,
+        "delivery_receipt_property": None,
+        "errors": [],
+    }
+
+    if request_read_receipt:
+        try:
+            mail_item.ReadReceiptRequested = True
+            info["read_receipt_set"] = True
+            if verbose:
+                print("[email] ReadReceiptRequested set to True")
+        except Exception as e:
+            info["read_receipt_set"] = False
+            info["errors"].append(f"ReadReceiptRequested: {type(e).__name__}: {e}")
+            if verbose:
+                print(f"[email] ReadReceiptRequested failed: {e}")
+
+    if request_delivery_receipt:
+        delivery_set = False
+        for prop in ("OriginatorDeliveryReportRequested", "DeliveryReceiptRequested"):
+            try:
+                setattr(mail_item, prop, True)
+                info["delivery_receipt_set"] = True
+                info["delivery_receipt_property"] = prop
+                delivery_set = True
+                if verbose:
+                    print(f"[email] {prop} set to True")
+                break
+            except Exception as e:
+                info["errors"].append(f"{prop}: {type(e).__name__}: {e}")
+                if verbose:
+                    print(f"[email] {prop} failed: {e}")
+        if not delivery_set:
+            info["delivery_receipt_set"] = False
+
+    return info
 
 
 # ---------- resolução robusta de caminho do anexo ----------
@@ -311,6 +368,9 @@ def send_pauta_unificada(
     bcc: Optional[str],
     subject: Optional[str],
     body: Optional[str],
+    sent_on_behalf_of: Optional[str] = None,
+    request_read_receipt: bool = False,
+    request_delivery_receipt: bool = False,
     preview: bool = False,
     save_to_drafts: bool = False,
     account_hint: Optional[str] = None,
@@ -402,11 +462,15 @@ def send_pauta_unificada(
                 account_display = str(getattr(acc, "DisplayName", None) or getattr(acc, "SmtpAddress", None))
             except Exception:
                 account_display = None
-        # 'On behalf of' como reforço (requer permissão no Exchange)
+    on_behalf_of = (sent_on_behalf_of or "").strip() or None
+    if on_behalf_of is None and account_hint:
+        on_behalf_of = account_hint
+    # 'On behalf of' (requer permissao no Exchange)
+    if on_behalf_of:
         try:
-            m.SentOnBehalfOfName = account_hint
+            m.SentOnBehalfOfName = on_behalf_of
             if verbose:
-                print(f"[email] SentOnBehalfOfName set to: {account_hint}")
+                print(f"[email] SentOnBehalfOfName set to: {on_behalf_of}")
         except Exception as e:
             if verbose:
                 print(f"[email] SentOnBehalfOfName failed: {e}")
@@ -423,6 +487,12 @@ def send_pauta_unificada(
     m.Subject = subject or _default_subject(sessao)
     html_body = body or _default_body(sessao)
     m.HTMLBody = html_body
+    receipt_info = _set_receipt_requests(
+        m,
+        request_read_receipt=request_read_receipt,
+        request_delivery_receipt=request_delivery_receipt,
+        verbose=verbose,
+    )
 
     m.Attachments.Add(str(attach_abs))
 
@@ -450,9 +520,11 @@ def send_pauta_unificada(
         "recipients_resolved": bool(recipients_ok),
         "account": account_display,
         "account_hint": account_hint,
+        "sent_on_behalf_of": on_behalf_of,
         "preview": bool(preview),
         "save_to_drafts": bool(save_to_drafts),
         "force_sync": bool(force_sync),
+        "receipt_request": receipt_info,
     }
     log_path: Optional[str] = None
     send_status = None

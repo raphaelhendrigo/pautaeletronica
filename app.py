@@ -4,8 +4,9 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from dotenv import load_dotenv
 from main import run_pipeline
+from pautas_consulta import run_consulta_pautas_pipeline
+from settings import ConfigError, env, get_etcm_config, load_env
 
 # Envio via Outlook (pywin32)
 try:
@@ -64,13 +65,42 @@ def parse_args():
         description="Automação e-TCM: baixar planilhas, gerar PAUTA_UNIFICADA e (opcionalmente) enviar por Outlook."
     )
     # Execução/pipeline
+    p.add_argument(
+        "--modo",
+        type=str,
+        default="sonp",
+        choices=["sonp", "consulta-pautas"],
+        help="sonp (padrao) | consulta-pautas (exporta Excel consolidado)",
+    )
     p.add_argument("--headless", type=str, default="true", help="true|false (padrão: true)")
-    p.add_argument("--base-url", type=str, default="https://etcm.tcm.sp.gov.br", help="Base URL (padrão produção).")
+    p.add_argument(
+        "--base-url",
+        type=str,
+        default=env("ETCM_BASE_URL", env("BASE_URL", "https://etcm.tcm.sp.gov.br")),
+        help="Base URL (padrão produção).",
+    )
     p.add_argument("--sessao", type=str, default="71", help="Número da sessão (ex.: 71).")
     p.add_argument("--de", type=str, default="29/09/2025", help="Data inicial DD/MM/AAAA.")
     p.add_argument("--ate", type=str, default="29/10/2025", help="Data final DD/MM/AAAA.")
     p.add_argument("--download-dir", type=str, default="planilhas_71_2025", help="Pasta de downloads.")
-    p.add_argument("--output-dir", type=str, default="output", help="Pasta de saída para o DOCX final.")
+    p.add_argument("--output-dir", type=str, default="output", help="Pasta de saida (DOCX ou XLSX).")
+    p.add_argument(
+        "--competencias-download",
+        type=str,
+        default="pleno,1c,2c",
+        help="SONP: competencias a baixar (pleno,1c,2c).",
+    )
+    p.add_argument(
+        "--competencias",
+        type=str,
+        default="pleno,1c,2c",
+        help="Consulta de pautas: competencias separadas por virgula (pleno,1c,2c).",
+    )
+    p.add_argument("--situacao", type=str, default="", help="Consulta de pautas: filtrar situacao (opcional).")
+    p.add_argument("--consolidado-nome", type=str, default="", help="Nome do XLSX consolidado (opcional).")
+    p.add_argument("--sem-abas-competencia", action="store_true", help="Nao gerar abas por competencia.")
+    p.add_argument("--resumo", action="store_true", help="Gerar aba Resumo no XLSX consolidado.")
+    p.add_argument("--dedupe", action="store_true", help="Tentar deduplicar linhas no XLSX consolidado.")
 
     # Documento
     p.add_argument("--header-template", dest="header_template", default=_auto_header_default())
@@ -89,24 +119,21 @@ def parse_args():
                    help="Competência: 'pleno' | '1c' | '2c'")
     p.add_argument("--meta-data-abertura", type=str, default="", help='DD/MM/AAAA (obrigatório quando usar meta)')
     p.add_argument("--meta-data-encerramento", type=str, default="", help='DD/MM/AAAA (NP); se vazio, calcula +15 dias')
-    p.add_argument("--meta-horario", type=str, default="9h30min.", help='Presencial: horário (padrão "9h30min.")')
+    p.add_argument("--meta-horario", type=str, default="", help='Presencial: horário (padrão "9h30min.")')
 
     # E-mail (parametrizável por CLI/.env)
-    default_to_env = os.getenv("TCM_EMAIL_TO", "").strip()
-    default_to = default_to_env if default_to_env else (
-        "raphael.goncalves@tcmsp.tc.br"
-    )
+    default_to = (env("TCM_EMAIL_TO", "") or "").strip()
     p.add_argument("--send-email", action="store_true")
     p.add_argument("--email-preview", action="store_true")
     p.add_argument("--email-drafts", action="store_true")
     p.add_argument("--email-force-sync", action="store_true")
     p.add_argument("--email-to", type=str, default=default_to)
-    p.add_argument("--email-cc", type=str, default=os.getenv("TCM_EMAIL_CC", ""))
-    p.add_argument("--email-bcc", type=str, default=os.getenv("TCM_EMAIL_BCC", ""))
-    p.add_argument("--email-subject", type=str, default=os.getenv("TCM_EMAIL_SUBJECT", ""))
-    p.add_argument("--email-body", type=str, default=os.getenv("TCM_EMAIL_BODY", ""))
+    p.add_argument("--email-cc", type=str, default=env("TCM_EMAIL_CC", "") or "")
+    p.add_argument("--email-bcc", type=str, default=env("TCM_EMAIL_BCC", "") or "")
+    p.add_argument("--email-subject", type=str, default=env("TCM_EMAIL_SUBJECT", "") or "")
+    p.add_argument("--email-body", type=str, default=env("TCM_EMAIL_BODY", "") or "")
     p.add_argument("--email-body-file", type=str, default="")
-    p.add_argument("--email-account", type=str, default=os.getenv("TCM_EMAIL_ACCOUNT", ""))
+    p.add_argument("--email-account", type=str, default=env("TCM_EMAIL_ACCOUNT", "") or "")
     p.add_argument("--email-verbose", action="store_true")
     return p.parse_args()
 
@@ -138,31 +165,76 @@ def _export_meta_to_env(args):
         os.environ["TCM_META_DATA_ENCERRAMENTO"] = args.meta_data_encerramento
     os.environ["TCM_META_HORARIO"] = args.meta_horario or "9h30min."
 
+    # Forca abertura/encerramento exatamente como informado no CLI
+    os.environ["TCM_META_ABERTURA_FINAL"] = args.meta_data_abertura
+    if args.meta_data_encerramento:
+        os.environ["TCM_META_ENCERRAMENTO_FINAL"] = args.meta_data_encerramento
+    else:
+        try:
+            from datetime import datetime, timedelta
+            d = datetime.strptime(args.meta_data_abertura, "%d/%m/%Y")
+            # 15 dias corridos, contando o dia inicial -> +16 dias no calendario
+            os.environ["TCM_META_ENCERRAMENTO_FINAL"] = (d + timedelta(days=16)).strftime("%d/%m/%Y")
+        except Exception:
+            pass
+
 
 def main():
-    load_dotenv()
+    load_env()
     args = parse_args()
     headless = str2bool(args.headless)
+
+    try:
+        etcm = get_etcm_config()
+    except ConfigError as e:
+        raise SystemExit(str(e))
+
+    if args.modo == "consulta-pautas":
+        if args.send_email:
+            raise SystemExit("Envio por Outlook disponivel apenas no modo sonp.")
+
+        comp_list = [c.strip() for c in (args.competencias or "").split(",") if c.strip()]
+        nome_consolidado = args.consolidado_nome or None
+        sessao_input = None
+        if any(a.startswith("--sessao") for a in sys.argv[1:]):
+            sessao_input = args.sessao
+
+        run_consulta_pautas_pipeline(
+            base_url=(args.base_url or etcm.base_url).rstrip("/"),
+            usuario=etcm.username,
+            senha=etcm.password,
+            data_de=args.de,
+            data_ate=args.ate,
+            download_dir=args.download_dir,
+            output_dir=args.output_dir,
+            headless=headless,
+            competencias=comp_list,
+            num_sessao=sessao_input,
+            situacao=args.situacao or None,
+            nome_consolidado=nome_consolidado,
+            include_competencia_sheets=not args.sem_abas_competencia,
+            include_resumo=bool(args.resumo),
+            dedupe=bool(args.dedupe),
+        )
+        return
 
     # Injeta metadados (se informados) para o docx_maker
     _export_meta_to_env(args)
 
-    etcm_user = os.getenv("ETCM_USER", "").strip()
-    etcm_pass = os.getenv("ETCM_PASS", "").strip()
-    if not etcm_user or not etcm_pass:
-        raise SystemExit("Defina ETCM_USER e ETCM_PASS no .env.")
-
     pipeline_kwargs = dict(
-        base_url=args.base_url.rstrip("/"),
-        usuario=etcm_user,
-        senha=etcm_pass,
+        base_url=(args.base_url or etcm.base_url).rstrip("/"),
+        usuario=etcm.username,
+        senha=etcm.password,
         num_sessao=args.sessao,
         data_de=args.de,
         data_ate=args.ate,
         download_dir=args.download_dir,
         output_dir=args.output_dir,
         headless=headless,
+        competencia=(args.meta_competencia or None),
     )
+    comp_download = [c.strip() for c in (args.competencias_download or "").split(",") if c.strip()]
+    pipeline_kwargs["competencias_download"] = comp_download or None
 
     optional_kwargs = {}
     if args.header_template:
@@ -181,6 +253,8 @@ def main():
 
     # Envio por Outlook (opcional)
     if args.send_email:
+        if not args.email_to:
+            raise SystemExit("Defina --email-to ou TCM_EMAIL_TO para envio.")
         if send_pauta_unificada is None:
             raise SystemExit("Envio indisponível. Confirme email_outlook.py e pywin32 instalado.")
 

@@ -4,17 +4,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from flask import Flask, jsonify, request
-from dotenv import load_dotenv
-
 from main import run_pipeline
 from email_smtp import send_email_smtp
+from settings import ConfigError, env, get_etcm_config, get_smtp_config, load_env
 
 app = Flask(__name__)
-load_dotenv()
-
-def env(name: str, default: str | None = None) -> str | None:
-    val = os.getenv(name)
-    return val if val is not None and val != "" else default
+load_env()
 
 def _bool_env(name: str, default: bool = False) -> bool:
     v = (env(name) or "").strip().lower()
@@ -25,10 +20,12 @@ def _bool_env(name: str, default: bool = False) -> bool:
     return default
 
 def _run_once() -> dict:
-    # 1) parâmetros do pipeline
-    base_url = env("BASE_URL", "https://etcm.tcm.sp.gov.br")
-    etcm_user = env("ETCM_USER")
-    etcm_pass = env("ETCM_PASS")
+    # 1) parametros do pipeline
+    try:
+        etcm = get_etcm_config()
+    except ConfigError as e:
+        raise RuntimeError(str(e))
+    base_url = env("ETCM_BASE_URL", env("BASE_URL", etcm.base_url))
     num_sessao = env("SESSAO", "71")
     data_de = env("DATA_DE", "29/09/2025")
     data_ate = env("DATA_ATE", "29/10/2025")
@@ -38,15 +35,11 @@ def _run_once() -> dict:
     nome_docx = env("NOME_DOCX", f"PAUTA_UNIFICADA_{num_sessao}_2025.docx")
     header_template = env("HEADER_TEMPLATE", "papel_timbrado_tcm.docx")
     headless = _bool_env("HEADLESS", True)
-
-    if not etcm_user or not etcm_pass:
-        raise RuntimeError("Defina ETCM_USER e ETCM_PASS nas variáveis de ambiente.")
-
     # 2) executa pipeline (gera DOCX)
     out_path = run_pipeline(
         base_url=base_url,
-        usuario=etcm_user,
-        senha=etcm_pass,
+        usuario=etcm.username,
+        senha=etcm.password,
         num_sessao=num_sessao,
         data_de=data_de,
         data_ate=data_ate,
@@ -59,31 +52,28 @@ def _run_once() -> dict:
     )
 
     # 3) email via SMTP (para Cloud Run)
-    smtp_host = env("SMTP_HOST", "smtp.office365.com")
-    smtp_port = int(env("SMTP_PORT", "587"))
-    smtp_user = env("SMTP_USER") or env("SMTP_USERNAME") or env("EMAIL_USER") or ""
-    smtp_pass = env("SMTP_PASS") or env("SMTP_PASSWORD") or ""
-    sender = env("EMAIL_SENDER") or smtp_user
-    to = env("EMAIL_TO", sender)
-    cc = env("EMAIL_CC", "")
-    bcc = env("EMAIL_BCC", "")
-    subject = env("EMAIL_SUBJECT", f"TESTE – Pauta SONP {num_sessao} gerada automaticamente (GCP)")
-    body = env("EMAIL_BODY", f"<p>Segue em anexo a pauta gerada automaticamente para <b>SONP {num_sessao}</b>.<br/><i>Este é um envio de <b>teste</b> pelo GCP.</i></p>")
-
-    if not smtp_user or not smtp_pass or not sender:
-        raise RuntimeError("SMTP_USER/SMTP_PASS/EMAIL_SENDER não configurados para envio SMTP.")
+    default_subject = f"TESTE - Pauta SONP {num_sessao} gerada automaticamente (GCP)"
+    default_body = (
+        f"<p>Segue em anexo a pauta gerada automaticamente para <b>SONP {num_sessao}</b>."
+        f"<br/><i>Este e um envio de <b>teste</b> pelo GCP.</i></p>"
+    )
+    try:
+        smtp = get_smtp_config(default_subject=default_subject, default_body=default_body)
+    except ConfigError as e:
+        raise RuntimeError(str(e))
 
     send_email_smtp(
-        smtp_host=smtp_host,
-        smtp_port=smtp_port,
-        smtp_user=smtp_user,
-        smtp_pass=smtp_pass,
-        sender=sender,
-        to=to,
-        cc=cc,
-        bcc=bcc,
-        subject=subject,
-        html_body=body,
+
+        smtp_host=smtp.host,
+        smtp_port=smtp.port,
+        smtp_user=smtp.username,
+        smtp_pass=smtp.password,
+        sender=smtp.sender,
+        to=smtp.to,
+        cc=smtp.cc,
+        bcc=smtp.bcc,
+        subject=smtp.subject,
+        html_body=smtp.body,
         attachment=Path(out_path),
         sessao=num_sessao,
     )

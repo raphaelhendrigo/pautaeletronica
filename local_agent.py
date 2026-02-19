@@ -3,27 +3,29 @@ from __future__ import annotations
 import os, subprocess
 from pathlib import Path
 from flask import Flask, request, jsonify
+from settings import env, load_env
 
 PROJECT_DIR = Path(__file__).parent.resolve()
 VENV_PY = PROJECT_DIR / ".venv" / "Scripts" / "python.exe"
 APP_PY  = PROJECT_DIR / "app.py"
 
 app = Flask(__name__)
+load_env()
 
 def _defaults() -> dict:
     return {
         "headless": True,
-        "sessao": os.getenv("SESSAO", "71"),
-        "de": os.getenv("DATA_DE", "29/09/2025"),
-        "ate": os.getenv("DATA_ATE", "29/10/2025"),
+        "sessao": env("SESSAO", "71"),
+        "de": env("DATA_DE", "29/09/2025"),
+        "ate": env("DATA_ATE", "29/10/2025"),
         "download_dir": str(PROJECT_DIR / "downloads"),
         "output_dir": str(PROJECT_DIR / "output"),
         "header_template": str(PROJECT_DIR / "papel_timbrado_tcm.docx"),
         "nome_docx": "SONP_71_2025.docx",
         # email (usa a própria funcionalidade do app.py)
         "send_email": True,
-        "email_account": os.getenv("SMTP_USER", "raphael.goncalves@tcmsp.tc.br"),
-        "email_to": os.getenv("EMAIL_TO", "raphael.goncalves@tcmsp.tc.br"),
+        "email_account": env("TCM_EMAIL_ACCOUNT", ""),
+        "email_to": env("TCM_EMAIL_TO", ""),
         "email_subject": os.getenv("EMAIL_SUBJECT", "TESTE – Pauta SONP gerada automaticamente"),
         "email_body": os.getenv("EMAIL_BODY", "<p>Envio automático <b>teste</b>.</p>"),
         "email_verbose": True,
@@ -60,8 +62,8 @@ def run_now():
     if args.get("email_force_sync"): cmd.append("--email-force-sync")
 
     env = os.environ.copy()
-    env.setdefault("ETCM_USER", os.getenv("ETCM_USER", ""))  # já usa o que vc setou
-    env.setdefault("ETCM_PASS", os.getenv("ETCM_PASS", ""))
+    env.setdefault("ETCM_USERNAME", os.getenv("ETCM_USERNAME", os.getenv("ETCM_USER", "")))
+    env.setdefault("ETCM_PASSWORD", os.getenv("ETCM_PASSWORD", os.getenv("ETCM_PASS", "")))
 
     try:
         p = subprocess.run(

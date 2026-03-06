@@ -56,7 +56,8 @@ def _clean_tab_label(text: str) -> str:
     if not text:
         return ""
     cleaned = re.sub(r"\s+", " ", text).strip()
-    cleaned = re.sub(r"\s+\d+\s*$", "", cleaned).strip()
+    # Algumas UIs concatenam o contador da aba sem espaco (ex.: "ROBERTO BRAGUIM4").
+    cleaned = re.sub(r"\s*\d+\s*$", "", cleaned).strip()
     return cleaned
 
 def _looks_generic_tab_key(key: str) -> bool:
@@ -851,7 +852,8 @@ def _ativar_aba_conselheiro(scope, nome_upper: str) -> None:
                 txt = _clean_tab_label(txt)
             except PWError:
                 continue
-            if normalize_text(txt) == target:
+            txt_norm = normalize_text(txt)
+            if txt_norm == target or txt_norm.startswith(target) or target.startswith(txt_norm):
                 try:
                     li.click(timeout=1500); time.sleep(0.3); return
                 except PWError:

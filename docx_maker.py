@@ -76,6 +76,17 @@ def _weekday_of_next_week(today: datetime, weekday: int) -> date:
     return monday_next + timedelta(days=weekday)
 
 
+def _normalize_horario_text(value: str) -> str:
+    """Normaliza horario presencial para o padrao curto (ex.: 9h30)."""
+    raw = _ws(value)
+    if not raw:
+        return "9h30"
+    out = re.sub(r"(?i)\s*min\.?\s*$", "", raw)
+    out = re.sub(r"\.\s*$", "", out)
+    out = _ws(out)
+    return out or "9h30"
+
+
 def _cargo_conselheiro(nome: str) -> str:
     k = _strip_accents_lower(_ws(nome))
     if k == "domingos dissei":
@@ -348,6 +359,7 @@ _X000D_RE = re.compile(r"_x000d_", flags=re.IGNORECASE)
 _VALOR_INSTRUMENTO_RE = re.compile(r"\(?\s*valor do instrumento[^)]*\)?", flags=re.IGNORECASE)
 _EMPTY_PARENS_RE = re.compile(r"\(\s*\)")
 _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.;:])")
+_EX_OFFICIO_RE = re.compile(r"(?<![\"“”])\bEx\s+officio\b(?![\"“”])", flags=re.IGNORECASE)
 
 
 def _normalize_tc_id(value: str) -> str | None:
@@ -407,6 +419,7 @@ def sanitize_text(text: str) -> str:
         return ""
     out = _VALOR_INSTRUMENTO_RE.sub("", text)
     out = _EMPTY_PARENS_RE.sub("", out)
+    out = _EX_OFFICIO_RE.sub(lambda m: f"\"{m.group(0)}\"", out)
     out = out.replace(")..", ").")
     out = out.replace(").-", "). -")
     out = re.sub(r"\.\s*\.", ".", out)
@@ -553,6 +566,12 @@ _HYPHEN_CLASS = r"[-\u2010-\u2015]"
 
 
 def _build_keyword_pattern(term: str) -> re.Pattern:
+    # "TA"/"TAs" devem casar apenas como palavra independente.
+    norm = _strip_accents_lower(_ws(term))
+    if norm == "ta":
+        return re.compile(r"(?<!\w)TA(?!\w)", flags=re.IGNORECASE)
+    if norm == "tas":
+        return re.compile(r"(?<!\w)TAs(?!\w)", flags=re.IGNORECASE)
     esc = re.escape(term)
     esc = esc.replace(r"\ ", r"\s+")
     esc = esc.replace(r"\-", fr"\s*{_HYPHEN_CLASS}\s*")
@@ -969,21 +988,19 @@ def _add_assinatura_final(doc: Document) -> None:
     cargo = os.getenv("TCM_ASSINATURA_CARGO", "").strip()
     data_linha = os.getenv("TCM_ASSINATURA_DATA", "").strip()
     doc.add_paragraph("")
+    # Data antes da assinatura; assinatura permanece como ultimo elemento.
+    if data_linha:
+        _add_centered(doc, data_linha, bold=False, size=11)
+    else:
+        _add_centered(doc, "22 de janeiro de 2025", bold=False, size=11)
+    doc.add_paragraph("")
     if nome and cargo:
         _add_centered(doc, nome, bold=False, size=11)
         _add_centered(doc, cargo, bold=False, size=11)
-        if data_linha:
-            doc.add_paragraph("")
-            _add_centered(doc, data_linha, bold=False, size=11)
     else:
         # Assinatura padrÃ£o solicitada
         _add_centered(doc, "ROSELI DE MORAIS CHAVES", bold=False, size=11)
         _add_centered(doc, "SUBSECRETÁRIA-GERAL", bold=False, size=11)
-        doc.add_paragraph("")
-        if data_linha:
-            _add_centered(doc, data_linha, bold=False, size=11)
-        else:
-            _add_centered(doc, "22 de janeiro de 2025", bold=False, size=11)
 
 
 
@@ -1001,7 +1018,19 @@ def _add_item_paragraph(doc: Document, processo: str, objeto: str, idx: int | No
     r_sep = p.add_run(" - ")
     _fontify(r_sep, size=12)
 
-    _add_obj_with_highlights(p, _ws(objeto))
+    objeto_limpo = _clean_docx_text(_ws(objeto))
+    main_obj, adv_obj = _split_advogados(objeto_limpo)
+    _add_obj_with_highlights(p, _ws(main_obj))
+
+    if adv_obj:
+        adv_linhas = _split_parenthetical_lines(adv_obj)
+        if adv_linhas:
+            p.add_run().add_break()
+            for i, linha in enumerate(adv_linhas):
+                if i > 0:
+                    p.add_run().add_break()
+                r_adv = p.add_run(_clean_docx_text(linha))
+                _fontify(r_adv, size=10, bold=False)
 
 
 def _find_special_spans(texto: str) -> list[tuple[int, int]]:
@@ -1061,6 +1090,17 @@ def _add_obj_with_highlights(paragraph, texto: str) -> None:
             continue
         r = paragraph.add_run(chunk)
         _fontify(r, size=12, bold=is_bold)
+
+
+def _split_parenthetical_lines(texto: str) -> list[str]:
+    """Quebra texto em linhas, iniciando nova linha a cada novo '('."""
+    if not texto:
+        return []
+    cleaned = _clean_docx_text(texto).strip()
+    if not cleaned:
+        return []
+    parts = [p.strip() for p in re.split(r"(?=\()", cleaned) if p and p.strip()]
+    return parts or [cleaned]
 
 
 def _split_advogados(texto: str) -> tuple[str, str]:
@@ -1214,7 +1254,7 @@ class SessionMeta:
     competencia: str            # 'pleno' | '1c' | '2c'
     data_abertura: str          # "DD/MM/AAAA" (NP) OU data da realizaÃ§Ã£o (presencial)
     data_encerramento: str = "" # sÃ³ NP (se vazio, calcula +15 dias)
-    horario: str = "9h30min."   # sÃ³ presencial
+    horario: str = "9h30"       # sÃ³ presencial
     local: str = (
         "NO PLENÃRIO DO EDIFÃCIO PREFEITO FARIA LIMA E COM TRANSMISSÃO AO VIVO "
         "PELO CANAL TV TCMSP NO YOUTUBE."
@@ -1229,6 +1269,7 @@ class SessionMeta:
             "presencial": "presencial",
         }.get(self.formato, self.formato)
         self.competencia = self.competencia.strip().lower()
+        self.horario = _normalize_horario_text(self.horario)
         # garante 'Âª' ao final
         if "Âª" not in self.numero:
             try:
@@ -1286,7 +1327,7 @@ def _meta_from_env() -> Optional[SessionMeta]:
     num = os.getenv("TCM_META_NUMERO", "").strip()
     d_ab = os.getenv("TCM_META_DATA_ABERTURA", "").strip()
     d_en = os.getenv("TCM_META_DATA_ENCERRAMENTO", "").strip()
-    hr = os.getenv("TCM_META_HORARIO", "").strip() or "9h30min."
+    hr = os.getenv("TCM_META_HORARIO", "").strip() or "9h30"
     if not (tipo and formato and comp and num and d_ab):
         return None
     meta = SessionMeta(numero=num, tipo=tipo, formato=formato, competencia=comp,
@@ -1428,6 +1469,22 @@ def gerar_docx_unificado(
     else:
         _add_intro_padrao(doc, titulo)
 
+    meta_comp = _strip_accents_lower(meta_sessao.competencia) if meta_sessao else ""
+    meta_formato = _strip_accents_lower(meta_sessao.formato) if meta_sessao else ""
+    is_presencial_meta = bool(meta_sessao and meta_formato == "presencial")
+    is_pleno_presencial = bool(is_presencial_meta and meta_comp == "pleno")
+
+    # Em presencial, renderiza apenas a competencia da sessao (evita blocos de camaras no pleno presencial).
+    competencias_presentes = [
+        comp for comp in ["1c", "2c", "pleno"] if not df[df["Competencia"] == comp].empty
+    ]
+    if is_presencial_meta and meta_comp in {"1c", "2c", "pleno"}:
+        competencias_render = [meta_comp]
+    elif competencias_presentes:
+        competencias_render = competencias_presentes
+    else:
+        competencias_render = ["1c", "2c", "pleno"]
+
     # Prioridade fixa de revisores dentro de cada relator
     # 1) Vice-Presidente Ricardo Torres; 2) Corregedor Roberto Braguim; 3) Jo?o Antonio; 4) Eduardo Tuma; demais depois.
     rev_order = {
@@ -1473,6 +1530,14 @@ def gerar_docx_unificado(
         for relator in relatores:
             rel_key = _norm_relator_key(relator)
             bloco_relator = df_block[df_block["Relator"].map(_norm_relator_key) == rel_key]
+            # Regra solicitada: no pleno presencial, nao listar Domingos quando estiver sem processos.
+            if (
+                is_pleno_presencial
+                and competencia == "pleno"
+                and rel_key == "domingos dissei"
+                and bloco_relator.empty
+            ):
+                continue
             if bloco_relator.empty and not show_empty:
                 continue
             cargo = _cargo_conselheiro(relator)
@@ -1553,7 +1618,7 @@ def gerar_docx_unificado(
 
             doc.add_paragraph("")
 
-    for competencia in ["1c", "2c", "pleno"]:
+    for competencia in competencias_render:
         relatores = _relatores_por_competencia(competencia)
         df_comp = df[df["Competencia"] == competencia]
         df_comp = _sort_blocos(df_comp, relatores)

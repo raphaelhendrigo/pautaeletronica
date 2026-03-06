@@ -119,7 +119,7 @@ def parse_args():
                    help="Competência: 'pleno' | '1c' | '2c'")
     p.add_argument("--meta-data-abertura", type=str, default="", help='DD/MM/AAAA (obrigatório quando usar meta)')
     p.add_argument("--meta-data-encerramento", type=str, default="", help='DD/MM/AAAA (NP); se vazio, calcula +15 dias')
-    p.add_argument("--meta-horario", type=str, default="", help='Presencial: horário (padrão "9h30min.")')
+    p.add_argument("--meta-horario", type=str, default="", help='Presencial: horário (padrão "9h30")')
 
     # E-mail (parametrizável por CLI/.env)
     default_to = (env("TCM_EMAIL_TO", "") or "").strip()
@@ -163,7 +163,7 @@ def _export_meta_to_env(args):
     os.environ["TCM_META_DATA_ABERTURA"] = args.meta_data_abertura
     if args.meta_data_encerramento:
         os.environ["TCM_META_DATA_ENCERRAMENTO"] = args.meta_data_encerramento
-    os.environ["TCM_META_HORARIO"] = args.meta_horario or "9h30min."
+    os.environ["TCM_META_HORARIO"] = args.meta_horario or "9h30"
 
     # Forca abertura/encerramento exatamente como informado no CLI
     os.environ["TCM_META_ABERTURA_FINAL"] = args.meta_data_abertura

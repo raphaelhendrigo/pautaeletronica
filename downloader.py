@@ -1213,7 +1213,7 @@ def baixar_planilhas_sessao(
 ) -> List[PlanilhaStats]:
     """
     1) Abrir pesquisa e filtrar (consultarSessoesParaGabinete.aspx).
-    2) Clicar no botao 'ConsultaDaPauta' da linha {num_sessao}/2025.
+    2) Clicar no botao 'ConsultaDaPauta' da linha {num_sessao}/{ano}.
     3) Capturar o iframe do popup (processosDaPautaPorGabinete.aspx).
     4) Dentro do iframe, iterar abas de conselheiros e exportar Excel.
     """

@@ -10,7 +10,7 @@ from typing import Optional, Tuple, List
 import pandas as pd
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 from docx.opc.exceptions import PackageNotFoundError
 
 
@@ -45,6 +45,18 @@ def _parse_date_br(s: str) -> datetime | None:
 
 def _fmt_date_br(d: datetime | date) -> str:
     return (d if isinstance(d, datetime) else datetime.combine(d, datetime.min.time())).strftime("%d/%m/%Y")
+
+
+_MESES_PT = [
+    "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+    "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+]
+
+
+def _fmt_data_extenso(d: date | datetime) -> str:
+    if isinstance(d, datetime):
+        d = d.date()
+    return f"{d.day} de {_MESES_PT[d.month - 1]} de {d.year}"
 
 
 def _first_weekday_of_next_month(d: datetime, weekday: int) -> date:
@@ -152,6 +164,30 @@ _DUO_RELATOR_REVISOR = {
     "eduardo tuma": "RICARDO TORRES",
     "domingos dissei": "ROBERTO BRAGUIM",
 }
+
+
+_SUBSTITUTOS: set[str] = {
+    "daniela farias",
+    "vinicius zandona",
+    "luiz fernando",
+}
+
+_SUBSTITUTAS_FEMININAS: set[str] = {
+    "daniela farias",
+}
+
+_SUBSTITUTO_SUBSTITUI: dict[str, str] = {
+    "daniela farias": "roberto braguim",
+}
+
+
+def _is_substituto(nome: str) -> bool:
+    return _norm_relator_key(nome) in _SUBSTITUTOS
+
+
+def _is_feminino(nome: str) -> bool:
+    return _norm_relator_key(nome) in _SUBSTITUTAS_FEMININAS
+
 
 # Palavras/expressÃµes-chave a destacar (em negrito) no campo "Objeto".
 _OBJ_HL_TERMS: list[str] = [
@@ -352,9 +388,17 @@ _RETIRADO_PAUTA_SESSION_RE = re.compile(r"Retirado de Pauta (?:na|da)\s+([^.)()]
 _PESQUISADO_RE = re.compile(r"\([^)]*pesquisado em[^)]*\)", flags=re.IGNORECASE)
 _VALOR_RE = re.compile(r"\(\s*R\$\s*[^)]*\)")
 _VALOR_SOLTO_RE = re.compile(r"R\$\s*[\d\.,]+(?:\s*\w+)?", flags=re.IGNORECASE)
-_RT_RB_RE = re.compile(r"\b[A-Z]{2}\s*/\s*[A-Z]{2}\b")
-_RT_RB_TOKEN_RE = re.compile(r"\b(?:RT|RB)\b", flags=re.IGNORECASE)
-_VERIFICADO_RE = re.compile(r"\s*verificado\s+at[eé]\s+pe\w*$", flags=re.IGNORECASE)
+_CONS_SIGLAS_RE = r"(?:DD|RT|RB|JA|ET|DF)"
+_CONS_SIGLAS_PARENS_RE = re.compile(
+    r"\s*\(\s*" + _CONS_SIGLAS_RE + r"(?:\s*/\s*" + _CONS_SIGLAS_RE + r")*\s*\)",
+    flags=re.IGNORECASE,
+)
+_CONS_SIGLAS_COMBO_RE = re.compile(
+    r"(?<![A-Za-z0-9])" + _CONS_SIGLAS_RE + r"(?:\s*/\s*" + _CONS_SIGLAS_RE + r")+(?![A-Za-z0-9])",
+    flags=re.IGNORECASE,
+)
+_CONS_SIGLAS_TOKEN_RE = re.compile(r"\b" + _CONS_SIGLAS_RE + r"\b", flags=re.IGNORECASE)
+_VERIFICADO_RE = re.compile(r"\s*Verificado\s+at[eé]\s+a\s+pe[çc]a[^.\n)]*\.?", flags=re.IGNORECASE)
 _X000D_RE = re.compile(r"_x000d_", flags=re.IGNORECASE)
 _VALOR_INSTRUMENTO_RE = re.compile(r"\(?\s*valor do instrumento[^)]*\)?", flags=re.IGNORECASE)
 _EMPTY_PARENS_RE = re.compile(r"\(\s*\)")
@@ -375,6 +419,17 @@ def _normalize_tc_id(value: str) -> str | None:
     return f"TC/{num.zfill(6)}/{year}"
 
 
+def _process_year_num(value: str) -> tuple[int, int]:
+    norm = _normalize_tc_id(value) or _ws(value)
+    m = re.search(r"(\d{1,7})\s*/\s*(\d{4})", norm)
+    if not m:
+        return (9999, 0)
+    try:
+        return (int(m.group(2)), int(m.group(1)))
+    except ValueError:
+        return (9999, 0)
+
+
 def _extract_tramitam_group(texto: str) -> list[str]:
     if not texto or not _TRAMITA_RE.search(texto):
         return []
@@ -393,9 +448,16 @@ def _sanitize_objeto_text(texto: str) -> str:
     out = _X000D_RE.sub(" ", out)
     out = _VALOR_RE.sub("", out)
     out = _VALOR_SOLTO_RE.sub("", out)
-    out = _RT_RB_RE.sub("", out)
-    out = _RT_RB_TOKEN_RE.sub("", out)
+    out = _CONS_SIGLAS_PARENS_RE.sub("", out)
+    out = _CONS_SIGLAS_COMBO_RE.sub("", out)
+    out = _CONS_SIGLAS_TOKEN_RE.sub("", out)
     out = _PESQUISADO_RE.sub("", out)
+    out = re.sub(
+        r"Tramita\s+em\s+conjunto\s+com\s+os?\s+TCs?\s+",
+        "Tramitam em conjunto os TCs ",
+        out,
+        flags=re.IGNORECASE,
+    )
     out = out.replace(" ? peça", " - peça").replace("? peça", " - peça")
     out = _VERIFICADO_RE.sub("", out)
     out = _ws(out)
@@ -666,20 +728,23 @@ def sort_items_for_segment(items: pd.DataFrame, process_priority: dict[str, int]
     if items.empty:
         return items
     ranks = items["Objeto"].map(lambda t: compute_primary_keyword(_ws(t))[1])
+    year_num = items["Processo"].map(_process_year_num)
+    years = year_num.map(lambda t: t[0])
+    nums = year_num.map(lambda t: t[1])
     if process_priority:
         priorities = items["Processo"].map(
             lambda p: process_priority.get(_normalize_tc_id(_ws(p)) or _ws(p), 999)
         )
-        sort_cols = ["__GroupRank", "__ProcPriority"]
+        sort_cols = ["__GroupRank", "__ProcPriority", "__ProcYear", "__ProcNum"]
         return (
-            items.assign(__GroupRank=ranks, __ProcPriority=priorities)
+            items.assign(__GroupRank=ranks, __ProcPriority=priorities, __ProcYear=years, __ProcNum=nums)
             .sort_values(by=sort_cols, kind="stable")
-            .drop(columns=["__GroupRank", "__ProcPriority"])
+            .drop(columns=["__GroupRank", "__ProcPriority", "__ProcYear", "__ProcNum"])
         )
     return (
-        items.assign(__GroupRank=ranks)
-        .sort_values(by=["__GroupRank"], kind="stable")
-        .drop(columns=["__GroupRank"])
+        items.assign(__GroupRank=ranks, __ProcYear=years, __ProcNum=nums)
+        .sort_values(by=["__GroupRank", "__ProcYear", "__ProcNum"], kind="stable")
+        .drop(columns=["__GroupRank", "__ProcYear", "__ProcNum"])
     )
 
 
@@ -742,6 +807,7 @@ _CAMARA_RELATOR_MAP = {
     "domingos dissei": "1c",
     "ricardo torres": "1c",
     "roberto braguim": "1c",
+    "daniela farias": "1c",
     "joao antonio": "2c",
     "eduardo tuma": "2c",
 }
@@ -979,28 +1045,19 @@ def _add_centered(doc: Document, texto: str, bold=False, size=12) -> None:
 
 
 def _add_assinatura_final(doc: Document) -> None:
-    """Adiciona bloco de assinatura.
-    Se TCM_ASSINATURA_NOME/TCM_ASSINATURA_CARGO estiverem definidos, usa assinatura customizada;
-    caso contrÃ¡rio, usa o bloco padrÃ£o (Presidente, Vice, Corregedor).
-    """
+    """Adiciona local/data, nome e cargo no fecho da pauta."""
     import os
-    nome = os.getenv("TCM_ASSINATURA_NOME", "").strip()
-    cargo = os.getenv("TCM_ASSINATURA_CARGO", "").strip()
+    nome = os.getenv("TCM_ASSINATURA_NOME", "").strip() or "ROSELI DE MORAIS CHAVES"
+    cargo = os.getenv("TCM_ASSINATURA_CARGO", "").strip() or "Subsecretária-Geral"
     data_linha = os.getenv("TCM_ASSINATURA_DATA", "").strip()
+    if not data_linha:
+        data_linha = f"São Paulo, {_fmt_data_extenso(date.today())}."
+
     doc.add_paragraph("")
-    # Data antes da assinatura; assinatura permanece como ultimo elemento.
-    if data_linha:
-        _add_centered(doc, data_linha, bold=False, size=11)
-    else:
-        _add_centered(doc, "22 de janeiro de 2025", bold=False, size=11)
+    _add_centered(doc, data_linha, bold=False, size=11)
     doc.add_paragraph("")
-    if nome and cargo:
-        _add_centered(doc, nome, bold=False, size=11)
-        _add_centered(doc, cargo, bold=False, size=11)
-    else:
-        # Assinatura padrÃ£o solicitada
-        _add_centered(doc, "ROSELI DE MORAIS CHAVES", bold=False, size=11)
-        _add_centered(doc, "SUBSECRETÁRIA-GERAL", bold=False, size=11)
+    _add_centered(doc, nome, bold=False, size=11)
+    _add_centered(doc, cargo, bold=False, size=11)
 
 
 
@@ -1242,6 +1299,20 @@ def _format_reinc_relator_label(relator: str, cargo: str) -> str:
     return f"RELATOR {cargo} {name}".upper()
 
 
+def _format_relator_label(relator: str, roman_idx: int) -> str:
+    nome = _ws(relator).upper()
+    key = _norm_relator_key(nome)
+    roman_txt = _roman(roman_idx)
+    if key == "domingos dissei":
+        return f"{roman_txt} - CONSELHEIRO PRESIDENTE DOMINGOS DISSEI, na qualidade de Relator"
+    if _is_substituto(nome):
+        if _is_feminino(nome):
+            return f"{roman_txt} - RELATORA CONSELHEIRA SUBSTITUTA {nome}"
+        return f"{roman_txt} - RELATOR CONSELHEIRO SUBSTITUTO {nome}"
+    cargo = _cargo_conselheiro(nome)
+    return f"{roman_txt} - RELATOR {cargo} {nome}".upper()
+
+
 # =========================
 # CabeÃ§alhos por tipo de sessÃ£o
 # =========================
@@ -1347,11 +1418,19 @@ def _texto_competencia(meta: SessionMeta) -> str:
 def _montar_intro(meta: SessionMeta) -> str:
     tipo_up = "ORDINÃRIA" if meta.tipo.startswith("ordin") else "EXTRAORDINÃRIA"
     if meta.formato == "nao-presencial":
+        artigo = "art.153-A" if meta.tipo.startswith("ordin") else "art.153-b c/c art. 153 § 5º"
+        enc = (
+            f" e o encerramento previsto para 15 dias corridos ({meta.data_encerramento})."
+            if meta.data_encerramento else "."
+        )
+        comp_txt = _texto_competencia(meta)
+        comp_prefix = "DO TRIBUNAL PLENO " if comp_txt == "PLENO" else f"DA {comp_txt} "
         return (
-            f"DA {meta.numero} SESSÃO {tipo_up} NÃO PRESENCIAL EM AMBIENTE VIRTUAL DO TRIBUNAL DE CONTAS "
-            f"DO MUNICÍPIO DE SÃO PAULO, nos termos do §2º do art. 153-a do Regimento Interno, da Resolução nº 24/2025 e da "
-            f"Instrução nº 01/2025, cuja abertura está designada para o dia {meta.data_abertura} "
-            f"e o encerramento previsto para 15 dias corridos ({meta.data_encerramento})."
+            f"PAUTA DA {meta.numero} SESSÃO {tipo_up} NÃO PRESENCIAL EM AMBIENTE VIRTUAL "
+            f"{comp_prefix}DO TRIBUNAL DE CONTAS DO MUNICÍPIO DE SÃO PAULO, nos termos do "
+            f"{artigo} do Regimento Interno do TCMSP, cuja abertura está designada para o "
+            f"dia {meta.data_abertura}{enc} Aplicam-se, no que couber, as disposições da "
+            f"Resolução n.º 24/2025 e da Instrução n.º 01/2025."
         )
     else:
         comp_txt = _texto_competencia(meta)
@@ -1393,8 +1472,9 @@ def _add_intro_from_meta(doc: Document, meta: SessionMeta) -> None:
 def _add_intro_padrao(doc: Document, titulo: Optional[str]) -> None:
     _add_centered(doc, "PAUTA", bold=True, size=14)
     intro = (
-        "DA SESSÃO ORDINÃRIA NÃO PRESENCIAL DO TRIBUNAL DE CONTAS DO MUNICÃPIO DE SÃO PAULO, "
-        "nos termos das disposiÃ§Ãµes da ResoluÃ§Ã£o n.Âº 07/2019 e da InstruÃ§Ã£o n.Âº 01/2019."
+        "DA SESSÃO ORDINÁRIA NÃO PRESENCIAL EM AMBIENTE VIRTUAL DO TRIBUNAL PLENO "
+        "DO TRIBUNAL DE CONTAS DO MUNICÍPIO DE SÃO PAULO. Aplicam-se, no que couber, "
+        "as disposições da Resolução n.º 24/2025 e da Instrução n.º 01/2025."
     )
     p = doc.add_paragraph(_clean_docx_text(intro))
     _para_fmt(p, align=WD_ALIGN_PARAGRAPH.JUSTIFY, before=0, after=8, line=1.15)
@@ -1407,7 +1487,7 @@ def _add_intro_padrao(doc: Document, titulo: Optional[str]) -> None:
 
 
 _RELATORES_1C = ["DOMINGOS DISSEI", "RICARDO TORRES", "ROBERTO BRAGUIM"]
-_RELATORES_2C = ["RICARDO TORRES", "JOAO ANTONIO", "EDUARDO TUMA"]
+_RELATORES_2C = ["JOAO ANTONIO", "EDUARDO TUMA"]
 _RELATORES_PLENO = ["DOMINGOS DISSEI", "RICARDO TORRES", "ROBERTO BRAGUIM", "JOAO ANTONIO", "EDUARDO TUMA"]
 
 
@@ -1419,11 +1499,23 @@ def _competencia_label(comp: str) -> str:
     return "PROCESSOS DO PLENO"
 
 
+_PURPLE = RGBColor(0x80, 0x00, 0x80)
+
+
+def _add_competencia_heading(doc: Document, comp: str) -> None:
+    p = doc.add_paragraph()
+    _para_fmt(p, align=WD_ALIGN_PARAGRAPH.CENTER, before=6, after=6, line=1.15)
+    run = p.add_run(_clean_docx_text(_competencia_label(comp)))
+    _fontify(run, size=12, bold=True)
+    run.font.underline = True
+    run.font.color.rgb = _PURPLE
+
+
 def _competencia_presidente_label(comp: str) -> str | None:
     if comp == "1c":
         return "PRESIDENTE DA 1ª CÂMARA CONSELHEIRO PRESIDENTE DOMINGOS DISSEI"
     if comp == "2c":
-        return "PRESIDENTE DA 2ª CÂMARA CONSELHEIRO VICE-PRESIDENTE RICARDO TORRES"
+        return "PRESIDENTE DA 2ª CÂMARA CONSELHEIRO RICARDO TORRES"
     return None
 
 
@@ -1433,6 +1525,33 @@ def _relatores_por_competencia(comp: str) -> list[str]:
     if comp == "2c":
         return _RELATORES_2C
     return _RELATORES_PLENO
+
+
+def _relatores_para_render(comp: str, df_comp: pd.DataFrame) -> list[str]:
+    relatores = list(_relatores_por_competencia(comp))
+    presentes: dict[str, str] = {}
+    if not df_comp.empty and "Relator" in df_comp.columns:
+        for rel in df_comp["Relator"].dropna().tolist():
+            nome = _ws(rel).upper()
+            if nome:
+                presentes.setdefault(_norm_relator_key(nome), nome)
+
+    if comp in {"1c", "2c"}:
+        for idx, nome in enumerate(list(relatores)):
+            efetivo = _norm_relator_key(nome)
+            for substituto, substituido in _SUBSTITUTO_SUBSTITUI.items():
+                if substituido == efetivo and substituto in presentes:
+                    relatores[idx] = presentes[substituto]
+                    break
+
+    vistos = {_norm_relator_key(nome) for nome in relatores}
+    extras: list[str] = []
+    for key, nome in presentes.items():
+        if key not in vistos:
+            extras.append(nome)
+            vistos.add(key)
+    extras.sort(key=lambda nome: (0 if _is_substituto(nome) else 1, nome))
+    return relatores + extras
 
 
 def _process_priority_for_competencia(comp: str) -> dict[str, int]:
@@ -1540,11 +1659,11 @@ def gerar_docx_unificado(
                 continue
             if bloco_relator.empty and not show_empty:
                 continue
-            cargo = _cargo_conselheiro(relator)
             if use_roman:
-                rotulo_relator = f"{_roman(roman_counter)} - RELATOR {cargo} {relator}".upper()
+                rotulo_relator = _format_relator_label(relator, roman_counter)
                 roman_counter += 1
             else:
+                cargo = _cargo_conselheiro(relator)
                 rotulo_relator = _format_reinc_relator_label(relator, cargo)
 
             p_rel = doc.add_paragraph()
@@ -1619,11 +1738,11 @@ def gerar_docx_unificado(
             doc.add_paragraph("")
 
     for competencia in competencias_render:
-        relatores = _relatores_por_competencia(competencia)
         df_comp = df[df["Competencia"] == competencia]
+        relatores = _relatores_para_render(competencia, df_comp)
         df_comp = _sort_blocos(df_comp, relatores)
 
-        _add_centered(doc, _competencia_label(competencia), bold=True, size=12)
+        _add_competencia_heading(doc, competencia)
         doc.add_paragraph("")
         presidente = _competencia_presidente_label(competencia)
         if presidente:
